@@ -1,0 +1,7 @@
+(library
+ (name simpleASLp)
+ (public_name asli.simpleASLp)
+ (flags
+  (:standard -w -27 -cclib -lstdc++))
+ (modules simple)
+ (libraries pprint zarith z3 str pcre asli.libASL))
