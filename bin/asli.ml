@@ -19,6 +19,7 @@ module TC     = Tcheck
 module PP     = Asl_parser_pp
 module AST    = Asl_ast
 
+let opt_default = true
 let opt_prelude : string ref = ref "prelude.asl"
 let opt_filenames : string list ref = ref []
 let opt_print_version = ref false
@@ -318,19 +319,25 @@ let main () =
         if !opt_verbose then List.iter print_endline banner;
         if !opt_verbose then print_endline "\nType :? for help";
         let t  = LoadASL.read_file !opt_prelude true !opt_verbose in
-        let ts = List.map (fun filename ->
-            if Utils.endswith filename ".spec" then begin
-                LoadASL.read_spec filename !opt_verbose
-            end else if Utils.endswith filename ".asl" then begin
-                LoadASL.read_file filename false !opt_verbose
-            end else if Utils.endswith filename ".prj" then begin
-                [] (* ignore project files here and process later *)
-            end else begin
-                failwith ("Unrecognized file suffix on "^filename)
-            end
-        ) !opt_filenames
+        let ts = if ((List.length !opt_filenames) > 0) then 
+            (List.map (fun filename ->
+                if Utils.endswith filename ".spec" then begin
+                    LoadASL.read_spec filename !opt_verbose
+                end else if Utils.endswith filename ".asl" then begin
+                    LoadASL.read_file filename false !opt_verbose
+                end else if Utils.endswith filename ".prj" then begin
+                    [] (* ignore project files here and process later *)
+                end else begin
+                    failwith ("Unrecognized file suffix on "^filename)
+                end
+                ) !opt_filenames)
+            else (
+                Printf.printf "No ASL files specified; using inbuilt default\n";
+                let prelude = LoadASL.read_text Resources.prelude_dot_asl "prelude.asl" true false     in
+                let mra     = List.map (fun t -> LoadASL.read_text t "default" false false) Resources.asl_defs_text in
+                  (prelude :: mra)
+                    )
         in
-
         if !opt_verbose then Printf.printf "Building evaluation environment\n";
         let env = (try
             Eval.build_evaluation_environment (List.concat (t::ts))
