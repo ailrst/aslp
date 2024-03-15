@@ -59,7 +59,7 @@ let rec name_of_lexpr l =
  ****************************************************************)
 
 let write_preamble opens st =
-  Printf.fprintf st.oc "(* AUTO-GENERATED LIFTER FILE *)\n\n";
+  Printf.fprintf st.oc "(* AUTO-GENERATED LIFTER FILE *)";
   List.iter (fun n ->
     let s = String.capitalize_ascii n in
     Printf.fprintf st.oc "open %s\n" s) opens;

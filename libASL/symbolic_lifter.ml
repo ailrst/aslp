@@ -370,7 +370,6 @@ let run iset pat env =
   (* Perform offline PE *)
   Printf.printf "Stages 7-8: Offline Transform\n";
   let offline_fns = Offline_transform.run fns env in
-  let offline_fns = Bindings.mapi (fun k -> fnsig_upd_body (Offline_opt.CopyProp.run k)) offline_fns in
   let dsig = fnsig_upd_body (DecoderCleanup.run (unsupported_inst tests offline_fns)) dsig in
   let dsig = fnsig_upd_body (Transforms.RemoveUnused.remove_unused IdentSet.empty) dsig in
   Printf.printf "\n";
