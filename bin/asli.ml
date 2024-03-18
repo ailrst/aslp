@@ -205,10 +205,20 @@ let rec process_command (tcenv: TC.Env.t) (cpu: Cpu.cpu) (fname: string) (input0
             (fun s -> Printf.fprintf chan "%s\n" (Utils.to_string (PP.pp_raw_stmt s)))
             (Dis.dis_decode_entry cpu.env cpu.denv decoder op);
         Option.iter close_out chan_opt
+    | ":gen" :: iset :: id :: be :: dir ->
+        let backend : Cpu.gen_backend = (match be with 
+            | "scala" -> Scala 
+            | _ -> OCaml ) in
+        let dir = match dir with    
+            | s :: _ -> Some s 
+            | _ -> None in
+        let cpu' = Cpu.mkCPU cpu.env cpu.denv in
+        Printf.printf "Generating lifter for %s %s\n" iset id;
+        cpu'.gen iset backend ?directory:dir id
     | [":gen"; iset; id] ->
         let cpu' = Cpu.mkCPU cpu.env cpu.denv in
         Printf.printf "Generating lifter for %s %s\n" iset id;
-        cpu'.gen iset id
+        cpu'.gen iset OCaml id
     | ":dump" :: iset :: opcode :: rest ->
         let fname = 
             (match rest with 
