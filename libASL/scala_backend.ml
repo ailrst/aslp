@@ -3,36 +3,58 @@ open Asl_ast
 open Asl_utils
 
 
-module StringSet = Set.Make(String) ;;
+
+module StringTbl = Hashtbl.Make(String) ;;
+module IntTbl = Map.Make(Int) ;;
+
+
+type fsig = {
+  name: string;
+  targs: (ty option) list;
+  args: (ty option) list;
+}
 
 type st = {
   mutable indent: int;
   mutable skip_seq: bool;
   oc : out_channel;
-  mutable called_fun : StringSet.t;
-  mutable output_fun: StringSet.t
+  (* Function calls detected *)
+  mutable called_fun : fsig StringTbl.t;
+  (* Function implementations generated *)
+  mutable output_fun: fsig StringTbl.t;
+  (* mapping indent level -> scope count *) 
+  mutable decl_scopes: int IntTbl.t;
 }
 
 let global_imports = ["util.Logger"]
 let global_opens = ["ir"]
 
-(**
-and default_value t st =
-  match t with
-  | Type_Bits w -> Printf.sprintf "BitVecLiteral(0, %s)" (prints_expr w st)
-  | Type_Constructor (Ident "boolean") -> "TrueLiteral"
-  | Type_Constructor (Ident "integer") -> "BigInt(0)"
-  | Type_Constructor (Ident "rt_label") -> "0"
-  | Type_Array(Index_Range(lo, hi),ty) ->
-      let lo = prints_expr lo st in
-      let hi = prints_expr hi st in
-      let d = default_value ty st in
-      Printf.sprintf "Range.Exclusive((%s), (%s)).map(%s).toList" lo hi d
-  | _ -> failwith @@ "Unknown type for default value: " ^ (pp_type t)
+let uniq_counter : int ref = ref 0 
 
-Infer type
-  *)
+let new_index _ : int = uniq_counter := !uniq_counter + 1 ; !uniq_counter
 
+let get_decl_scope st = 
+  ((IntTbl.find_opt  st.indent st.decl_scopes) |> (function 
+    | Some(t) -> t
+    | None -> 0)) 
+
+let add_decl_scope st = 
+   st.decl_scopes <- (IntTbl.add st.indent ((get_decl_scope st) + 1) st.decl_scopes)
+
+let clear_decl_scope st = 
+   st.decl_scopes <- (IntTbl.add st.indent (0) st.decl_scopes)
+
+
+let mergeSig (a: fsig) (b: fsig) : fsig = 
+  let merge x y = List.map2 (fun a b -> (match (a, b) with
+    | (Some x, _) -> Some x
+    | (_, Some x) -> Some x
+    | _ -> None
+  )) x y in
+  {name = a.name; targs = (merge a.targs b.targs); args = (merge a.args b .args)}
+  
+
+(* Shallow inspection of an expression to guess its type. *)
 let infer_type e =
     let tint = Some (Type_Constructor (Ident "integer")) in
     let tbool  = Some (Type_Constructor (Ident "boolean"))  in
@@ -64,6 +86,8 @@ let prints_arg_type (t) : string =
   | (Type_Bits _) -> "BitVecLiteral" 
   | (Type_Constructor (Ident "integer")) -> "BigInt"
   | (Type_Constructor (Ident "boolean")) -> "Boolean"
+  | Type_Constructor (Ident "rt_label") -> "Expr"
+  | Type_Constructor (Ident "rt_sym") -> "Expr"
   | t -> failwith @@ "Unknown arg type: " ^ (pp_type t)
 
 let prints_ret_type t =
@@ -71,6 +95,7 @@ let prints_ret_type t =
   | Some (Type_Constructor (Ident "boolean")) -> "Boolean"
   | None -> "Unit"
   | Some t -> failwith @@ "Unknown return type: " ^ (pp_type t)
+
 (****************************************************************
  * String Utils
  ****************************************************************)
@@ -78,16 +103,15 @@ let prints_ret_type t =
 let inc_depth st = st.indent <- st.indent + 2
 let dec_depth st = st.indent <- st.indent - 2
 
-let funcall_to_sig (name: string) (targs: expr list) (args : expr list) = 
-  let targs = List.mapi (fun i f -> (match (infer_type f) with 
-    | Some(t) -> ("targ" ^ Int.to_string i ^ ": " ^ prints_arg_type t)
-    | None -> ("targ" ^ (Int.to_string i) ^ ": " ^ pp_expr f)
-  )) targs in
-  let args = List.mapi (fun i f -> (match (infer_type f) with 
-    | Some(t) -> ("arg" ^ Int.to_string i ^ ": " ^ prints_arg_type t)
-    | None -> ("arg" ^ (Int.to_string i) ^ ": " ^ pp_expr f)
-  )) args in
-  name ^ "(" ^ (String.concat "," (targs@args)) ^ ")"
+let funcall_to_sig (name: string) (targs: expr list) (args : expr list) : fsig = 
+  let targs = List.map infer_type targs in
+  let args = List.map infer_type args in
+  {name=name; targs=targs; args=args}
+
+let update_funcalls (f:fsig) (tbl: fsig StringTbl.t) : unit = 
+  match (StringTbl.find_opt (tbl) f.name) with 
+    | Some e -> StringTbl.replace tbl f.name (mergeSig e f)
+    | None -> StringTbl.add (tbl) f.name f
 
 let replace s =
   String.fold_left (fun acc c ->
@@ -126,8 +150,8 @@ let rec name_of_lexpr l =
 let rec prints_expr e st =
   match e with
   (* Boolean Expressions *)
-  | Expr_Var(Ident "TRUE") -> "TrueLiteral"
-  | Expr_Var(Ident "FALSE") -> "FalseLiteral"
+  | Expr_Var(Ident "TRUE") -> "true"
+  | Expr_Var(Ident "FALSE") -> "false"
   | Expr_TApply(FIdent("and_bool", 0), [], [a;b]) ->
       Printf.sprintf "((%s) && (%s))" (prints_expr a st) (prints_expr b st)
   | Expr_TApply(FIdent("or_bool", 0), [], [a;b]) ->
@@ -162,25 +186,25 @@ let rec prints_expr e st =
       let e = prints_expr e st in
       let i = prints_expr i st in
       let w = prints_expr w st in
-      Printf.sprintf "bvextract((%s),(%s),(%s)), %s)" e i w w
+      Printf.sprintf "bvextract(%s,%s,%s, %s)" e i w w
   | Expr_TApply(f, targs, args) ->
       let f = name_of_ident f in
-      print_endline (funcall_to_sig f targs args) ;
+      update_funcalls (funcall_to_sig f targs args) st.called_fun  ; 
       let args = List.map (fun e -> prints_expr e st) (targs@args) in
       f ^ "(" ^ (String.concat ", " (args)) ^ ")"
 
   | Expr_LitString s -> "\"" ^ s ^ "\""
   | Expr_Tuple(es) -> "(" ^ (String.concat "," (List.map (fun e -> prints_expr e st) es)) ^ ")"
-  | Expr_Unknown(ty) -> default_value ty st
+  | Expr_Unknown(ty) -> default_value ty st (* Sound? *)
 
   | _ -> failwith @@ "prints_expr: " ^ pp_expr e
 
 and default_value t st =
   match t with
   | Type_Bits w -> Printf.sprintf "BitVecLiteral(0, %s)" (prints_expr w st)
-  | Type_Constructor (Ident "boolean") -> "TrueLiteral"
+  | Type_Constructor (Ident "boolean") -> "true"
   | Type_Constructor (Ident "integer") -> "BigInt(0)"
-  | Type_Constructor (Ident "rt_label") -> "0"
+  | Type_Constructor (Ident "rt_label") -> "null"
   | Type_Array(Index_Range(lo, hi),ty) ->
       let lo = prints_expr lo st in
       let hi = prints_expr hi st in
@@ -200,7 +224,7 @@ let write_line s st =
 let write_seq st =
   if st.skip_seq then
     st.skip_seq <- false
-  else Printf.fprintf st.oc ";\n"
+  else Printf.fprintf st.oc "\n"
 
 let write_nl st =
   Printf.fprintf st.oc "\n"
@@ -223,21 +247,21 @@ let write_assert s st =
 let write_unsupported st =
   write_line "throw Exception(\"not supported\")" st
 
-let write_call f targs args st =
+let write_call f (targs : typeid list) (args: typeid list) st =
   let f = name_of_ident f in
   let args = targs @ args in
-  let call = f ^ " (" ^ (String.concat ") (" args) ^ ")" in
+  let call = f ^ " (" ^ (String.concat "," args) ^ ")" in
   write_line call st
 
-let write_ref v e st =
+let write_ref v ty e st =
   let name = name_of_ident v in
-  let s = Printf.sprintf "var %s = (%s) \n" name e in
+  let s = Printf.sprintf "var %s : %s = (%s) \n" name (prints_arg_type ty) e in
   st.skip_seq <- true;
   write_line s st
 
-let write_let v e st =
+let write_let v ty e st =
   let v = name_of_ident v in
-  let s = Printf.sprintf "val %s = %s \n" v e in
+  let s = Printf.sprintf "val %s : %s = %s \n" v (prints_arg_type ty) e in
   st.skip_seq <- true;
   write_line s st
 
@@ -286,7 +310,7 @@ let rec write_assign v e st =
       write_line s st
 
   | LExpr_Tuple (ls) ->
-      let vars = List.init (List.length ls) (fun i -> "tmp" ^ (string_of_int i)) in
+      let vars = List.init (List.length ls) (fun i -> "tmp" ^ (string_of_int (new_index ()))) in
       let v = "(" ^ String.concat "," vars ^ ")" in
       let s = Printf.sprintf "val %s = %s \n" v e in
       st.skip_seq <- true;
@@ -301,22 +325,29 @@ let rec write_assign v e st =
 let rec write_stmt s st =
   match s with
   | Stmt_VarDeclsNoInit(ty, vs, loc) ->
+      add_decl_scope st; 
+      write_line "{\n" st;
       let e = default_value ty st in
-      List.iter (fun v -> write_ref v e st) vs
+      List.iter (fun v -> write_ref v ty e st) vs 
 
   | Stmt_VarDecl(ty, v, e, loc) ->
+      add_decl_scope st; 
+      write_line "{\n" st;
       let e = prints_expr e st in
-      write_ref v e st
+      write_ref v ty e st
 
   | Stmt_ConstDecl(ty, v, e, loc) ->
+      add_decl_scope st; 
+      write_line "{\n" st;
       let e = prints_expr e st in
-      write_let v e st
+      write_let v ty e st
 
   | Stmt_Assign(l, r, loc) ->
       let e = prints_expr r st in
       write_assign l e st
 
   | Stmt_TCall(f, tes, es, loc) ->
+      update_funcalls (funcall_to_sig (name_of_ident f) tes es) st.called_fun  ;
       let tes = List.map (fun e -> prints_expr e st) tes in
       let es = List.map (fun e -> prints_expr e st) es in
       write_call f tes es st
@@ -353,13 +384,18 @@ and write_stmts s st =
   match s with
   | [] ->
       write_proc_return st;
+      write_line (String.concat "" (List.init (get_decl_scope st) (fun _ -> "}"))) st;
+      clear_decl_scope st;
       dec_depth st
   | x::xs ->
+      write_line "// new stmt \n" st;
       write_stmt x st;
       List.iter (fun s ->
         write_seq st;
         write_stmt s st
       ) xs;
+      write_line (String.concat "" (List.init (get_decl_scope st) (fun _ -> "}"))) st;
+      clear_decl_scope st;
       dec_depth st;
       assert (not st.skip_seq)
 
@@ -382,9 +418,9 @@ let write_epilogue (fid: AST.ident) st =
 }" (plain_ident fid) (name_of_ident fid)
 
 open AST
-module Bindings = Map.Make(AST.Id)
 
-let init_st oc : st = { indent = 0; skip_seq=false;  oc ; called_fun=StringSet.empty; output_fun=StringSet.empty} 
+let init_st : st = { indent = 0; skip_seq=false; called_fun=StringTbl.create 100; output_fun=StringTbl.create 100; oc=stdout; decl_scopes = IntTbl.empty} 
+let rinit_st oc st : st = { indent = 0; skip_seq=false;  oc ; called_fun=st.called_fun; output_fun=st.output_fun; decl_scopes = st.decl_scopes} 
 
 let build_args (tys: ((ty * ident)  list)) targs args =
   let targs =  List.map (fun t -> name_of_ident t) targs in 
@@ -392,7 +428,11 @@ let build_args (tys: ((ty * ident)  list)) targs args =
   if List.length targs = 0 && List.length args = 0 then "()"
   else "(" ^ (String.concat "," (targs@ta)) ^ ")" 
 
+
 let write_fn (name: AST.ident) (ret_tyo, argtypes, targs, args, _, body) st = 
+  update_funcalls {name=(name_of_ident name); 
+    targs=(List.map (fun _ -> Some (Type_Constructor (Ident "integer"))) targs); 
+    args = List.map (fun (t, _) -> Some t) (argtypes)} (st.output_fun) ;
   let args = build_args argtypes targs args in
   let ret = prints_ret_type ret_tyo in
   Printf.fprintf st.oc "def %s %s : %s = {\n" (name_of_ident name) args ret;
@@ -400,11 +440,11 @@ let write_fn (name: AST.ident) (ret_tyo, argtypes, targs, args, _, body) st =
   Printf.fprintf st.oc "\n}\n"
 
 (* Write an instruction file, containing just the behaviour of one instructions *)
-let write_instr_file fn fnsig dir =
+let write_instr_file fn fnsig dir st =
   let m = name_of_FIdent fn in
   let path = dir ^ "/" ^ m ^ ".scala" in
   let oc = open_out path in
-  let st = init_st oc in
+  let st = rinit_st oc st in
   write_preamble global_imports global_opens st;
   write_fn fn fnsig st;
   close_out oc;
@@ -412,16 +452,44 @@ let write_instr_file fn fnsig dir =
 
 
 (* Write the decoder file - should depend on all of the above *)
-let write_decoder_file fn fnsig deps dir =
+let write_decoder_file fn fnsig deps dir st =
   let m = "aslpOffline" in
   let path = dir ^ "/" ^ m ^ ".scala" in
   let oc = open_out path in
-  let st = init_st oc in
-  write_preamble global_imports (global_opens @ deps) st;
+  let st = rinit_st oc st in
+  write_preamble global_imports (global_opens) st;
   write_fn fn fnsig st;
   write_epilogue fn st;
   close_out oc;
   m 
+
+(* Write the test file, containing all decode tests *)
+let write_test_file tests dir st =
+  let m = "decode_tests" in
+  let path = dir ^ "/" ^ m ^".scala" in
+  let oc = open_out path in
+  let st = rinit_st oc st in
+  write_preamble global_imports (global_opens) st;
+  Bindings.iter (fun i s -> write_fn i s st) tests;
+  close_out oc;
+  m
+
+let printfundiff st = 
+  print_endline (String.concat ("") (List.map (fun _ -> "-") (List.init 80 (fun x -> x + 1))));
+  print_endline "Functions called and not generated:\n" ;
+  let print_fsig (oc:out_channel) (f:fsig) = 
+    let totypename l = ((List.map (function 
+          | Some t -> prints_arg_type  t
+          | None -> "?"
+        ) l))
+    in
+    let withparamname p l : string list = ((List.mapi (fun i s -> p ^ (Int.to_string i) ^ ": " ^ s) (totypename l))) in 
+    Printf.sprintf "%s ( %s )" f.name (String.concat ", " (List.sort String.compare (withparamname "targ" f.targs)@(withparamname "arg" f.args))) in
+  let diff = Seq.filter 
+     (fun f -> (StringTbl.find_opt st.output_fun f) == None) 
+    (StringTbl.to_seq_keys st.called_fun) in
+  List.iter (print_endline) (List.sort String.compare (List.of_seq (Seq.map (fun f -> print_fsig stdout (StringTbl.find st.called_fun f)) diff)))
+
 
 (* Write all of the above, expecting Utils.ml to already be present in dir *)
 (* decoder fun decodef fnsig, test funs, instruction funs, output directory  
@@ -431,9 +499,14 @@ let write_decoder_file fn fnsig deps dir =
   let files = Bindings.fold (fun fn fnsig acc -> (write_instr_file fn fnsig dir)::acc) fns [] in
   write_decoder_file dfn dfnsig files dir |> ignore
    *)
-let run (dfn: AST.ident) dfnsig tests fns dir : unit =
-  let files = Bindings.fold (fun fn fnsig acc -> (write_instr_file fn fnsig dir)::acc) fns [] in
-  write_decoder_file dfn dfnsig files dir |> ignore ; 
+
+
+let run (dfn: AST.ident) dfnsig tests (fns : (ty option * (ty * ident) list * ident list * 'a list * 'b * stmt list) Bindings.t) dir : unit =
+  let st = init_st  in
+  let files = Bindings.fold (fun fn fnsig acc -> (write_instr_file fn fnsig dir st)::acc) fns [] in
+  let files = (write_test_file tests dir st)::files in
+  write_decoder_file dfn dfnsig files dir st |> ignore ; 
+  printfundiff st ;
   ()
 
 
