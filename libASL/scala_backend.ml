@@ -3,9 +3,47 @@ open Asl_ast
 open Asl_utils
 
 
-
 module StringTbl = Hashtbl.Make(String) ;;
 module IntTbl = Map.Make(Int) ;;
+module DefSet = Set.Make(struct 
+  type t = (ident * ty) 
+  let compare (a,b) (c,d) = (match (Stdlib.compare a c) with
+      | 0 -> Stdlib.compare b d 
+      | s -> s)
+end)
+
+
+let (let@) x f = fun s ->
+  let (s,r) = x s in
+  (f r) s
+let (let+) x f = fun s ->
+  let (s,r) = x s in
+  (s,f r)
+
+
+module LocMap = Map.Make(struct
+  type t = l
+  let compare = Stdlib.compare
+end)
+
+class find_defs = object (self)
+  inherit Asl_visitor.nopAslVisitor
+  val mutable defs = LocMap.empty 
+
+  method add_dep loc i = defs <- LocMap.add loc i defs 
+  method get_deps = defs
+
+  method! vstmt = function
+    | Stmt_VarDeclsNoInit(ty, [v], loc) -> self#add_dep loc (v, ty); SkipChildren
+    | Stmt_VarDecl(ty, v, e, loc) -> self#add_dep loc (v ,ty); SkipChildren
+    | Stmt_ConstDecl(ty, v, e, loc) -> self#add_dep loc (v , ty) ; SkipChildren
+    | _ -> DoChildren
+end 
+
+let definedat body =  
+  let v = new find_defs in
+  Asl_visitor.visit_stmts v body |> ignore ;
+  v#get_deps
 
 
 type fsig = {
@@ -24,6 +62,8 @@ type st = {
   mutable output_fun: fsig StringTbl.t;
   (* mapping indent level -> scope count *) 
   mutable decl_scopes: int IntTbl.t;
+
+  mutable definitions : DefSet.t;
 }
 
 let global_imports = ["util.Logger"]
@@ -37,6 +77,8 @@ let get_decl_scope st =
   ((IntTbl.find_opt  st.indent st.decl_scopes) |> (function 
     | Some(t) -> t
     | None -> 0)) 
+
+
 
 let add_decl_scope st = 
    st.decl_scopes <- (IntTbl.add st.indent ((get_decl_scope st) + 1) st.decl_scopes)
@@ -322,6 +364,82 @@ let rec write_assign v e st =
 
   | _ -> failwith @@ "write_assign: " ^ (pp_lexpr v)
 
+
+(*let add_def d t defs =  DefSet.add (d, t) defs *)
+
+type block = { 
+  mutable stmts: stmt list;
+  mutable defs: DefSet.t;
+}
+
+type proc = {
+  name: ident;
+  mutable params: DefSet.t;
+  mutable blocks: block list;
+}
+
+
+type funwork = {
+  mutable procs: proc list;
+  mutable bl: block;
+  mutable pr: proc;
+}
+
+let init_fn name params: funwork = {procs = []; bl = {stmts = []; defs = params} ; pr = {name=name; params=params; blocks = []}}
+
+let empty_block _ = {stmts=[]; defs = DefSet.empty}
+let continue_block b = {b with stmts=[]}
+
+let new_name _ = Ident ( "proc_" ^ (string_of_int (new_index ()))) 
+
+let add_stmt f (s: stmt) = !f.bl.stmts <- (!f.bl.stmts @ [s]) 
+
+let add_def f d t = !f.bl.defs <- (DefSet.add (d,t) !f.bl.defs)
+
+let commit_block f = 
+  !f.pr.blocks <- !f.pr.blocks@[!f.bl]; 
+  !f.bl <- {!f.bl with stmts = []} 
+
+let params_call defs = List.map (fun (d, t) -> Expr_Var d) (DefSet.to_list defs) 
+
+let add_procs f p = !f.procs <- !f.procs @ p 
+
+let commit_proc f = 
+    let n_name = new_name () in
+    commit_block f; 
+    !f.procs <- !f.procs@[!f.pr] ; 
+    !f.pr <- {name = n_name ; params = !f.bl.defs; blocks = [{!f.bl with stmts = []}]}
+
+let rec split_stmt s (f: funwork ref) : unit =  
+  (match s with
+    | Stmt_VarDeclsNoInit(ty, vs, loc) -> add_stmt f s  ; List.iter (fun d -> add_def f d ty ) vs 
+    | Stmt_VarDecl(ty, v, e, loc) -> add_stmt f s  ; add_def f v ty 
+    | Stmt_ConstDecl(ty, v, e, loc) -> add_stmt f s ; add_def f v ty  
+    | Stmt_FunReturn(e, loc) ->add_stmt f s ; commit_block f 
+    | Stmt_ProcReturn(loc) ->add_stmt f s ; commit_block f 
+    | Stmt_If(c, thensl, elsesl, ff, loc) ->
+        commit_block f ;
+        (* unconditionally split the ifcond subblocks into separate blocks *)
+        let rec iter = function
+        | S_Elsif_Cond(c,b)::xs ->
+            S_Elsif_Cond(c, split_stmts b f)::(iter xs)
+        | [] -> [] in
+        let thennew = (split_stmts thensl f) in
+        let elsenew = iter elsesl in
+        let ffnew = split_stmts ff f in
+        add_stmt f (Stmt_If(c, thennew, elsenew, ffnew, loc))
+    | _ -> ()) 
+
+and split_stmts (ss: stmt list) (f: funwork ref) : stmt list = 
+  match ss with
+    | [] -> ss
+    | xs -> 
+      let nf = ref (init_fn (new_name ()) !f.bl.defs) in
+      let cf = !nf.pr in
+      List.iter (fun s -> split_stmt s nf) xs; commit_proc nf; (add_procs f !nf.procs) ;
+      [Stmt_TCall(cf.name, [], (params_call cf.params), Unknown)]
+
+
 let rec write_stmt s st =
   match s with
   | Stmt_VarDeclsNoInit(ty, vs, loc) ->
@@ -419,8 +537,8 @@ let write_epilogue (fid: AST.ident) st =
 
 open AST
 
-let init_st : st = { indent = 0; skip_seq=false; called_fun=StringTbl.create 100; output_fun=StringTbl.create 100; oc=stdout; decl_scopes = IntTbl.empty} 
-let rinit_st oc st : st = { indent = 0; skip_seq=false;  oc ; called_fun=st.called_fun; output_fun=st.output_fun; decl_scopes = st.decl_scopes} 
+let init_st : st = { indent = 0; skip_seq=false; called_fun=StringTbl.create 100; output_fun=StringTbl.create 100; oc=stdout; decl_scopes = IntTbl.empty; definitions = DefSet.empty} 
+let rinit_st oc st : st =  {st with indent = 0; skip_seq=false;  oc=oc;  definitions = DefSet.empty} 
 
 let build_args (tys: ((ty * ident)  list)) targs args =
   let targs =  List.map (fun t -> name_of_ident t) targs in 
@@ -429,7 +547,10 @@ let build_args (tys: ((ty * ident)  list)) targs args =
   else "(" ^ (String.concat "," (targs@ta)) ^ ")" 
 
 
-let write_fn (name: AST.ident) (ret_tyo, argtypes, targs, args, _, body) st = 
+
+  
+
+let print_write_fn (name: AST.ident) (ret_tyo, argtypes, targs, args, _, body) st = 
   update_funcalls {name=(name_of_ident name); 
     targs=(List.map (fun _ -> Some (Type_Constructor (Ident "integer"))) targs); 
     args = List.map (fun (t, _) -> Some t) (argtypes)} (st.output_fun) ;
@@ -438,6 +559,24 @@ let write_fn (name: AST.ident) (ret_tyo, argtypes, targs, args, _, body) st =
   Printf.fprintf st.oc "def %s %s : %s = {\n" (name_of_ident name) args ret;
   write_stmts body st;
   Printf.fprintf st.oc "\n}\n"
+
+
+
+let to_binding (p:proc) : (AST.ident * ('a option) * ((ty * ident) list) * (ident list)  * 'b * (stmt list) ) = 
+  let argtypes : (ty * ident ) list = List.map (fun (b,a) -> (a,b)) (DefSet.to_list p.params) in
+  let args = (List.map snd (DefSet.to_list p.params)) in
+  (p.name, None,  argtypes, [], args, List.concat (List.map (fun f -> f.stmts) p.blocks) ) 
+
+let write_fn (name: AST.ident) (ret_tyo, argtypes, targs, args, _, body) st = 
+  let bs = DefSet.of_list (List.map (fun (a,t) -> (t,a)) argtypes) in
+  let b = ref @@ init_fn name bs in
+  let nb = split_stmts body b in
+  print_write_fn name (ret_tyo, argtypes, targs, args, (), nb) st;
+  List.iter (fun p -> 
+    let nm, rt, art, targs, args , body = to_binding p in
+    print_write_fn (nm) (rt,art,targs,args,(),body) st
+  ) !b.procs
+
 
 (* Write an instruction file, containing just the behaviour of one instructions *)
 let write_instr_file fn fnsig dir st =
