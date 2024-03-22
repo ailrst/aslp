@@ -1697,3 +1697,88 @@ module RemoveRegisters = struct
     visit_stmts v
 
 end
+
+
+
+module FixRedefinitions = struct
+  type var_t = {name: ident ; index: int}
+  module Bindings = Map.Make(struct
+    type t = ident
+    let compare = Stdlib.compare
+  end);;
+
+  let ident_for_v (e: var_t) : ident =
+    if e.index = 0 then e.name else
+    match e.name with
+    | Ident s -> Ident (s ^ "_" ^ (string_of_int e.index))
+    | FIdent (s, i) -> FIdent ((s ^ "_" ^ (string_of_int e.index), i))
+
+  class redef_renamer (globals) = object(this)
+    inherit Asl_visitor.nopAslVisitor
+
+    val mutable seen = Bindings.empty
+    val scoped_bindings : (var_t Bindings.t) Stack.t =
+      let s = Stack.create () in
+      (*Stack.push (Bindings.empty) s ; 
+      s*)
+      let globals =  Seq.map (fun f -> (f, {name=f; index=0})) (IdentSet.to_seq globals) in
+      Stack.push (Bindings.of_seq globals) s ; s
+
+    method push_scope (_:unit) : unit = Stack.push (Bindings.empty) scoped_bindings
+    method pop_scope (_:unit) : unit = Stack.pop scoped_bindings |> ignore
+    method add_bind (n: var_t) : unit = Stack.push (Bindings.add n.name n (Stack.pop scoped_bindings)) scoped_bindings
+    method existing_binding (i: ident) : var_t option = Seq.find_map (fun s -> Bindings.find_opt i s) (Stack.to_seq scoped_bindings)
+      
+
+    method incr_binding (i: ident) : var_t =
+      let v = this#existing_binding i in
+      match v with
+      | Some b -> {b with index = b.index + 1}
+      | None -> {name=i; index=0}
+
+    method! vstmt s =
+      match s with
+        | Stmt_VarDeclsNoInit(ty, vs, loc) ->
+            let ns = List.map this#incr_binding vs in
+            List.iter this#add_bind ns; DoChildren
+        | Stmt_VarDecl(ty, v, i, loc) ->
+            let b = this#incr_binding v in
+            this#add_bind b; DoChildren
+        | Stmt_ConstDecl(ty, v, i, loc) ->
+            let b = this#incr_binding v in
+            this#add_bind b; DoChildren
+        | Stmt_If (c, t, els, e, loc) ->
+            let c'   = visit_expr this c in
+            this#push_scope () ;
+            let t'   = visit_stmts this t in
+            this#pop_scope (); this#push_scope () ;
+            let els' = mapNoCopy (visit_s_elsif this ) els in
+            this#pop_scope (); this#push_scope () ;
+            let e'   = visit_stmts this e in
+            this#pop_scope ();
+            ChangeTo (Stmt_If (c', t', els', e', loc))
+        (* Statements with child scopes that shouldn't appear towards the end of transform pipeline *)
+        | Stmt_Case _ -> failwith "(FixRedefinitions) case not expected"
+        | Stmt_For _ -> failwith "(FixRedefinitions) for not expected"
+        | Stmt_While _ -> failwith "(FixRedefinitions) while not expected"
+        | Stmt_Repeat _ -> failwith "(FixRedefinitions) repeat not expected"
+        | Stmt_Try _ -> failwith "(FixRedefinitions) try not expected"
+        | _ -> DoChildren
+
+    method! vlvar e =
+       (match (this#existing_binding e) with
+          | Some e -> ChangeTo (ident_for_v e)
+          | None -> SkipChildren)
+
+    method! vvar e =
+       (match (this#existing_binding e) with
+          | Some e -> ChangeTo (ident_for_v e)
+          | None -> SkipChildren)
+
+    end
+
+  let run (g: IdentSet.t) (s:stmt list) : stmt list =
+    let v = new redef_renamer g in
+    visit_stmts v s
+end
+
