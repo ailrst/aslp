@@ -1,7 +1,15 @@
 
 open Asl_ast
 open Asl_utils
+open Visitor
 
+open Asl_utils
+
+open AST
+open Visitor
+open Asl_visitor
+open Symbolic
+open Value
 
 module StringTbl = Hashtbl.Make(String) ;;
 module IntTbl = Map.Make(Int) ;;
@@ -445,6 +453,19 @@ let get_proc_return_type (p: proc) : ty option =
     | l -> Some (Type_Tuple l)  
   
 
+module CountStmts = struct
+  class stmt_counter = object(this)
+    inherit Asl_visitor.nopAslVisitor
+    val mutable stmt_count: int  = 0
+
+    method !vstmt s = stmt_count <- stmt_count + 1; DoChildren
+
+    method count (s:stmt) : int = stmt_count <- 0; (visit_stmt this s) |> ignore; stmt_count
+  end
+
+  let count_stmts_list (s:stmt list) : int list = List.map ((new stmt_counter)#count) s
+  let count_stmts (s:stmt) : int = (new stmt_counter)#count s
+end
 
 
 let init_fn name params ret: funwork = {procs = []; bl = {stmts = []; defs = params} ; pr = {name=name; params=params; blocks = []; updated = ExprSet.empty; rt_return = ret; returning = false; stmt_count = 0}} 
