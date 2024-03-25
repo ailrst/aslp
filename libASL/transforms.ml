@@ -1707,6 +1707,7 @@ module type ScopedBindings = sig
     val add_bind : 'elt t  -> ident -> 'elt -> unit 
     val find_binding : 'elt t -> ident -> 'elt option 
     val current_scope_bindings : 'elt t -> 'elt Bindings.t
+    val init: unit -> 'elt t  
 end
 
 module ScopedBindings : ScopedBindings = struct 
@@ -1715,8 +1716,8 @@ module ScopedBindings : ScopedBindings = struct
   let pop_scope (b:'elt t) (_:unit) : unit = Stack.pop_opt b |> ignore 
   let add_bind (b:'elt t) k v : unit = Stack.push (Bindings.add k v (Stack.pop b)) b 
   let find_binding (b:'elt t) (i) : 'a option = Seq.find_map (fun s -> Bindings.find_opt i s) (Stack.to_seq b)
+  let init (u:unit) : 'elt t = let s = Stack.create () in Stack.push (Bindings.empty) s; s
 
-  
   let current_scope_bindings (b:'elt t) : 'elt Bindings.t = 
     let keyset c = IdentSet.of_list (Bindings.bindings c |> List.map fst) in
     let keysdiff a b = IdentSet.diff (keyset a) (keyset b) in

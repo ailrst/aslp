@@ -100,6 +100,9 @@ let problematic_enc = [
   "aarch64_vector_shift_right_simd";
   "aarch64_vector_transfer_vector_cpy_dup_simd";
   "aarch64_vector_transfer_vector_table";
+  "aarch64_vector_arithmetic_unary_cmp_int_bulk_simd";
+  "aarch64_vector_arithmetic_binary_element_mul_acc_double_sisd";
+  "aarch64_vector_arithmetic_binary_uniform_cmp_bitwise_simd";
 ]
 
 (* Model doesn't need these globals *)
