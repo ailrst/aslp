@@ -1718,7 +1718,7 @@ module ScopedBindings : ScopedBindings = struct
 
   
   let current_scope_bindings (b:'elt t) : 'elt Bindings.t = 
-    let keyset c = IdentSet.of_list (Bindings.to_list c |> List.map fst) in
+    let keyset c = IdentSet.of_list (Bindings.bindings c |> List.map fst) in
     let keysdiff a b = IdentSet.diff (keyset a) (keyset b) in
     let join bas bbs = Bindings.add_seq (Seq.map (fun i -> i, Bindings.find i bbs) (IdentSet.to_seq (keysdiff bbs bas))) bas in
     List.fold_left join Bindings.empty (List.of_seq (Stack.to_seq b))
