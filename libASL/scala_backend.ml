@@ -1,14 +1,10 @@
 
-open Asl_ast
-open Asl_utils
 open Visitor
 
 open Asl_utils
 
 open AST
-open Visitor
 open Asl_visitor
-open Symbolic
 open Value
 
 module StringTbl = Hashtbl.Make(String) ;;
@@ -52,17 +48,16 @@ class find_defs = object (self)
     | _ -> DoChildren
 end 
 
-let definedat body =  
-  let v = new find_defs in
-  Asl_visitor.visit_stmts v body |> ignore ;
-  v#get_deps
-
 
 type fsig = {
   name: string;
   targs: (ty option) list;
   args: (ty option) list;
 }
+
+type varkind = 
+  | Mutable
+  | Immutable
 
 type st = {
   mutable indent: int;
@@ -73,10 +68,30 @@ type st = {
   (* Function implementations generated *)
   mutable output_fun: fsig StringTbl.t;
   (* mapping indent level -> scope count *) 
-  mutable decl_scopes: int IntTbl.t;
 
   mutable definitions : DefSet.t;
+
+  mutable mutable_vars : (varkind Bindings.t) Stack.t ;
 }
+
+let define (st) (t: varkind) (v:ident) = Stack.push (Stack.pop st.mutable_vars |> Bindings.add v t) st.mutable_vars
+let push_scope st = Stack.push  Bindings.empty (st.mutable_vars)
+let pop_scope st = Stack.pop (st.mutable_vars) |> ignore
+
+let var_mutable (v:ident) (st) = 
+  let find_def v n = 
+    let rec find (r: (('a Bindings.t) list)) = match (r) with 
+      | h::tl -> (match (Bindings.find_opt v h) with 
+          | Some y -> Some y
+          | None -> find tl
+          )
+      | nil -> None 
+    in
+    find (List.of_seq (Stack.to_seq n))
+  in
+  match (find_def v st.mutable_vars) with 
+    | Some d -> d
+    | None -> Immutable
 
 let global_imports = ["util.Logger"]
 let global_opens = ["ir"]
@@ -85,19 +100,6 @@ let uniq_counter : int ref = ref 0
 
 let new_index _ : int = uniq_counter := !uniq_counter + 1 ; !uniq_counter
 let new_indexs (b: string) : string = b ^ (string_of_int (new_index ()))
-
-let get_decl_scope st = 
-  ((IntTbl.find_opt  st.indent st.decl_scopes) |> (function 
-    | Some(t) -> t
-    | None -> 0)) 
-
-
-
-let add_decl_scope st = 
-   st.decl_scopes <- (IntTbl.add st.indent ((get_decl_scope st) + 1) st.decl_scopes)
-
-let clear_decl_scope st = 
-   st.decl_scopes <- (IntTbl.add st.indent (0) st.decl_scopes)
 
 
 let mergeSig (a: fsig) (b: fsig) : fsig = 
@@ -222,7 +224,9 @@ let rec prints_expr e st =
       Printf.sprintf " (!(%s))" (prints_expr a st)
 
   (* State Accesses *)
-  | Expr_Var(v) -> (name_of_ident v)
+  | Expr_Var(v) -> (match (var_mutable v st) with 
+      | Mutable -> (name_of_ident v) ^ ".v"
+      | Immutable -> (name_of_ident v))
   | Expr_Field(e, f) ->
       prints_expr e st ^ "." ^ name_of_ident f
   | Expr_Array(a,i) ->
@@ -317,7 +321,7 @@ let write_call f (targs : typeid list) (args: typeid list) st =
 
 let write_ref v ty e st =
   let name = name_of_ident v in
-  let s = Printf.sprintf "var %s : %s = (%s) \n" name (prints_arg_type ty) e in
+  let s = Printf.sprintf "val %s = Mutable[%s](%s)\n" name (prints_arg_type ty) e in
   st.skip_seq <- true;
   write_line s st
 
@@ -349,7 +353,7 @@ let write_if_end st =
  ****************************************************************)
 
 
-let prints_lexpr v = 
+let prints_lexpr v st = 
   match v with
   | LExpr_Wildcard -> "_"
   | LExpr_Var v -> name_of_ident v
@@ -375,14 +379,17 @@ let rec write_assign v e st =
       write_line s st*)
 
   | LExpr_Var v ->
-      let v = name_of_ident v in
+      let v = (match var_mutable v st with 
+        | Mutable ->  (name_of_ident v) ^ ".v" 
+        | Immutable ->  (name_of_ident v) 
+      ) in
       let s = Printf.sprintf "%s = %s" v e in
       write_line s st
 
   | LExpr_Array (LExpr_Var v, i) ->
       let i = prints_expr i st in
       let v = name_of_ident v in
-      let s = Printf.sprintf "%s = list_update (%s) (%s) (%s)" v v i e in
+      let s = Printf.sprintf "%s = list_update (%s, %s, (%s)" v v i e in
       write_line s st
 
   | LExpr_Field (l, f) ->
@@ -560,20 +567,17 @@ let split_stmts (ss: stmt list) (f: funwork ref) : stmt list =
 let rec write_stmt s st =
   match s with
   | Stmt_VarDeclsNoInit(ty, vs, loc) ->
-      add_decl_scope st; 
-      write_line "{\n" st;
+      List.iter (define  st Mutable) vs ;
       let e = default_value ty st in
       List.iter (fun v -> write_ref v ty e st) vs 
 
   | Stmt_VarDecl(ty, v, e, loc) ->
-      add_decl_scope st; 
-      write_line "{\n" st;
+      define st Mutable v;
       let e = prints_expr e st in
       write_ref v ty e st
 
   | Stmt_ConstDecl(ty, v, e, loc) ->
-      add_decl_scope st; 
-      write_line "{\n" st;
+      define st Immutable v;
       let e = prints_expr e st in
       write_let v ty e st
 
@@ -616,11 +620,10 @@ let rec write_stmt s st =
 
 and write_stmts s st =
   inc_depth st;
+  push_scope st;
   match s with
   | [] ->
       write_proc_return st;
-      write_line (String.concat "" (List.init (get_decl_scope st) (fun _ -> "}"))) st;
-      clear_decl_scope st;
       dec_depth st
   | x::xs ->
       write_line "// new stmt \n" st;
@@ -629,10 +632,9 @@ and write_stmts s st =
         write_seq st;
         write_stmt s st
       ) xs;
-      write_line (String.concat "" (List.init (get_decl_scope st) (fun _ -> "}"))) st;
-      clear_decl_scope st;
       dec_depth st;
-      assert (not st.skip_seq)
+    assert (not st.skip_seq)
+  ; pop_scope st
 
 
 let write_preamble imports opens st =
@@ -654,18 +656,23 @@ let write_epilogue (fid: AST.ident) st =
 
 open AST
 
-let init_st : st = { indent = 0; skip_seq=false; called_fun=StringTbl.create 100; output_fun=StringTbl.create 100; oc=stdout; decl_scopes = IntTbl.empty; definitions = DefSet.empty} 
-let rinit_st oc st : st =  {st with indent = 0; skip_seq=false;  oc=oc;  definitions = DefSet.empty} 
+
+let init_b (u:unit) = let s = Stack.create () in 
+  Stack.push Bindings.empty s;
+  s
+
+let init_st : st = { indent = 0; skip_seq=false; called_fun=StringTbl.create 100; output_fun=StringTbl.create 100; oc=stdout; definitions = DefSet.empty; mutable_vars = init_b ()} 
+let rinit_st oc st : st =  {st with indent = 0; skip_seq=false;  oc=oc;  definitions = DefSet.empty; mutable_vars = init_b ()} 
 
 let build_args (tys: ((ty * ident)  list)) targs args =
   let targs =  List.map (fun t -> name_of_ident t) targs in 
   let args =  List.map (fun t -> name_of_ident t) args in 
-  let ta = List.map (fun (t, i) -> "_" ^ (name_of_ident i) ^ ": " ^ (prints_arg_type t)) tys in
+  let ta = List.map (fun (t, i) -> (name_of_ident i) ^ ": " ^ (prints_arg_type t)) tys in
   if List.length targs = 0 && List.length args = 0 then "()"
   else "(" ^ (String.concat "," (targs@ta)) ^ ")" 
 
 let build_args_mut (targs: ident list) (args: ident list) st =
-  List.iter (fun (i) -> write_line (Printf.sprintf "var %s = _%s\n"  (i)  (i)) st) (targs@args |> List.map name_of_ident)
+  List.iter (fun (i) -> write_line (Printf.sprintf "val %s  = Mutable(_%s)\n"  (i)  (i)) st) (targs@args |> List.map name_of_ident)
 
 let print_write_fn (name: AST.ident) (ret_tyo, argtypes, targs, args, _, body) st = 
   update_funcalls {name=(name_of_ident name); 
@@ -675,7 +682,6 @@ let print_write_fn (name: AST.ident) (ret_tyo, argtypes, targs, args, _, body) s
   let ret = prints_ret_type ret_tyo in
   Printf.fprintf st.oc "def %s %s %s = {\n" (name_of_ident name) wargs ret;
   inc_depth st ;
-  build_args_mut targs args st;
   dec_depth st ;
   write_stmts body st;
   Printf.fprintf st.oc "\n}\n"
@@ -690,7 +696,7 @@ let proc_to_funsig (p:proc) : (AST.ident * ('a option) * ((ty * ident) list) * (
 let write_fn (name: AST.ident) (ret_tyo, argtypes, targs, args, _, body) st = 
   let bs = DefSet.of_list (List.map (fun (a,t) -> (t,a, false)) argtypes) in
   let b = ref @@ init_fn name bs (Some ret_tyo) in
-  let nb = split_stmts body b in
+  let nb = body in
   print_write_fn name (ret_tyo, argtypes, targs, args, (), nb) st;
   List.iter (fun p -> 
     let nm, rt, art, targs, args , body = proc_to_funsig p in
