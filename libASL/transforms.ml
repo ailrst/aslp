@@ -1699,13 +1699,33 @@ module RemoveRegisters = struct
 end
 
 
+module type ScopedBindings = sig  
+    type 'elt t = 'elt Bindings.t Stack.t
+
+    val push_scope : 'elt t  -> unit -> unit 
+    val pop_scope : 'elt t  -> unit -> unit 
+    val add_bind : 'elt t  -> ident -> 'elt -> unit 
+    val find_binding : 'elt t -> ident -> 'elt option 
+    val current_scope_bindings : 'elt t -> 'elt Bindings.t
+end
+
+module ScopedBindings : ScopedBindings = struct 
+  type 'elt t = 'elt Bindings.t Stack.t
+  let push_scope (b:'elt t) (_:unit) : unit = Stack.push (Bindings.empty) b 
+  let pop_scope (b:'elt t) (_:unit) : unit = Stack.pop_opt b |> ignore 
+  let add_bind (b:'elt t) k v : unit = Stack.push (Bindings.add k v (Stack.pop b)) b 
+  let find_binding (b:'elt t) (i) : 'a option = Seq.find_map (fun s -> Bindings.find_opt i s) (Stack.to_seq b)
+
+  
+  let current_scope_bindings (b:'elt t) : 'elt Bindings.t = 
+    let keyset c = IdentSet.of_list (Bindings.bindings c |> List.map fst) in
+    let keysdiff a b = IdentSet.diff (keyset a) (keyset b) in
+    let join bas bbs = Bindings.add_seq (Seq.map (fun i -> i, Bindings.find i bbs) (IdentSet.to_seq (keysdiff bbs bas))) bas in
+    List.fold_left join Bindings.empty (List.of_seq (Stack.to_seq b))
+end
 
 module FixRedefinitions = struct
   type var_t = {name: ident ; index: int}
-  module Bindings = Map.Make(struct
-    type t = ident
-    let compare = Stdlib.compare
-  end);;
 
   let ident_for_v (e: var_t) : ident =
     if e.index = 0 then e.name else
@@ -1713,22 +1733,20 @@ module FixRedefinitions = struct
     | Ident s -> Ident (s ^ "_" ^ (string_of_int e.index))
     | FIdent (s, i) -> FIdent ((s ^ "_" ^ (string_of_int e.index), i))
 
+  open ScopedBindings
+
   class redef_renamer (globals) = object(this)
     inherit Asl_visitor.nopAslVisitor
 
     val mutable seen = Bindings.empty
-    val scoped_bindings : (var_t Bindings.t) Stack.t =
+    val scoped_bindings : var_t ScopedBindings.t =
       let s = Stack.create () in
-      (*Stack.push (Bindings.empty) s ; 
-      s*)
-      let globals =  Seq.map (fun f -> (f, {name=f; index=0})) (IdentSet.to_seq globals) in
-      Stack.push (Bindings.of_seq globals) s ; s
+      Stack.push (Bindings.empty) s ; s
 
-    method push_scope (_:unit) : unit = Stack.push (Bindings.empty) scoped_bindings
-    method pop_scope (_:unit) : unit = Stack.pop scoped_bindings |> ignore
-    method add_bind (n: var_t) : unit = Stack.push (Bindings.add n.name n (Stack.pop scoped_bindings)) scoped_bindings
-    method existing_binding (i: ident) : var_t option = Seq.find_map (fun s -> Bindings.find_opt i s) (Stack.to_seq scoped_bindings)
-      
+    method push_scope (_:unit) : unit = push_scope scoped_bindings ()
+    method pop_scope (_:unit) : unit = pop_scope scoped_bindings () 
+    method add_bind (n: var_t) : unit = add_bind scoped_bindings n.name n 
+    method existing_binding (i: ident) : var_t option = find_binding scoped_bindings i
 
     method incr_binding (i: ident) : var_t =
       let v = this#existing_binding i in
