@@ -88,6 +88,8 @@ f_slt_bits ( targ0: BigInt, arg0: ?, arg1: BitVecLiteral )
 f_sub_bits ( targ0: BigInt, arg0: BitVecLiteral, arg1: BitVecLiteral )
  */
 
+class Mutable[T](var v: T)
+
 def extract(x: BigInt, sz: BigInt) = x % (BigInt(2).pow((sz + 1).toInt))
 
 def mkBits(n: Int, y: BigInt): BitVecLiteral = {
@@ -230,21 +232,21 @@ def f_gen_assert ( arg0: Expr ) = throw NotImplementedError("func not implemente
 def f_switch_context ( arg0: Expr ) = throw NotImplementedError("func not implemented")
 
 
-def v_PSTATE_C = Register("PSTATE.C", BoolType) // Expr_Field(Expr_Var(Ident "PSTATE"), Ident "C")
-def v_PSTATE_Z = Register("PSTATE.Z", BoolType) // Expr_Field(Expr_Var(Ident "PSTATE"), Ident "Z")
-def v_PSTATE_V = Register("PSTATE.V", BoolType) // Expr_Field(Expr_Var(Ident "PSTATE"), Ident "V")
-def v_PSTATE_N = Register("PSTATE.N", BoolType) // Expr_Field(Expr_Var(Ident "PSTATE"), Ident "N")
-def v__PC      = Register("_PC", IntType) // Expr_Var(Ident "_PC")
-def v__R       = Register("_R", IntType)
-def v__Z       = Register("_Z", BoolType)
-def v_SP_EL0   = Register("SP_EL0", BoolType)
-def v_FPSR     = Register("FPSR", BoolType)
-def v_FPCR     = Register("FPCR", BoolType)
+def v_PSTATE_C = Mutable(Register("PSTATE.C", BoolType)) // Expr_Field(Expr_Var(Ident "PSTATE"), Ident "C")
+def v_PSTATE_Z = Mutable(Register("PSTATE.Z", BoolType)) // Expr_Field(Expr_Var(Ident "PSTATE"), Ident "Z")
+def v_PSTATE_V = Mutable(Register("PSTATE.V", BoolType)) // Expr_Field(Expr_Var(Ident "PSTATE"), Ident "V")
+def v_PSTATE_N = Mutable(Register("PSTATE.N", BoolType)) // Expr_Field(Expr_Var(Ident "PSTATE"), Ident "N")
+def v__PC      = Mutable(Register("_PC", IntType)) // Expr_Var(Ident "_PC")
+def v__R       = Mutable(Register("_R", IntType))
+def v__Z       = Mutable(Register("_Z", BoolType))
+def v_SP_EL0   = Mutable(Register("SP_EL0", BoolType))
+def v_FPSR     = Mutable(Register("FPSR", BoolType))
+def v_FPCR     = Mutable(Register("FPCR", BoolType))
 
-def v_PSTATE_BTYPE =  Register("PSTATE.BTYPE", BoolType) // Expr_Field(Expr_Var(Ident "PSTATE"), Ident "BTYPE")
-def v_BTypeCompatible = Register("BTypeCompatible", BoolType) // Expr_Var (Ident "BTypeCompatible")
-def v___BranchTaken = Register("__BranchTaken", BoolType)
-def v_BTypeNext = Register("BTypeNext", BoolType)
-def v___ExclusiveLocal = Register("__ExclusiveLocal", BoolType)
+def v_PSTATE_BTYPE =  Mutable(Register("PSTATE.BTYPE", BoolType)) // Expr_Field(Expr_Var(Ident "PSTATE"), Ident "BTYPE")
+def v_BTypeCompatible = Mutable(Register("BTypeCompatible", BoolType)) // Expr_Var (Ident "BTypeCompatible")
+def v___BranchTaken = Mutable(Register("__BranchTaken", BoolType))
+def v_BTypeNext = Mutable(Register("BTypeNext", BoolType))
+def v___ExclusiveLocal = Mutable(Register("__ExclusiveLocal", BoolType))
 
 

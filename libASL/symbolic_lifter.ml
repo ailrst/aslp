@@ -42,7 +42,12 @@ let problematic_enc = [
   "aarch64_system_register_system";
   "aarch64_system_register_cpsr";
 
-  (* Too big for scala *)
+  (* too big after splitting *)
+  "aarch64_integer_crc";
+  "aarch64_vector_arithmetic_binary_element_dotp";
+  "aarch64_vector_arithmetic_unary_special_sqrt_est_fp16_simd";
+  "aarch64_vector_shift_left_sat_simd";
+  (* Too big for scala 
   "aarch64_float_convert_int";
   "aarch64_integer_arithmetic_cnt";
   "aarch64_integer_bitfield";
@@ -103,6 +108,7 @@ let problematic_enc = [
   "aarch64_vector_arithmetic_unary_cmp_int_bulk_simd";
   "aarch64_vector_arithmetic_binary_element_mul_acc_double_sisd";
   "aarch64_vector_arithmetic_binary_uniform_cmp_bitwise_simd";
+    *)
 ]
 
 (* Model doesn't need these globals *)
