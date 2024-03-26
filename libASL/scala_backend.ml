@@ -26,7 +26,6 @@ module EmbeddingLanguage = struct
     arg_types: (var_type * ident) list;
     targs: ident list;
     args: ident list;
-    loc: l;
     body: stmt list;
   }
 
@@ -73,6 +72,13 @@ class find_defs = object (self)
 end 
 
 
+type stvarinfo = {
+  ident : ident;
+  var : expr;
+  typ : var_type; 
+}
+
+let state_var = { var = Expr_Var (Ident "st"); typ = Immutable (Type_Constructor (Ident "LiftState")); ident = Ident "st" } 
 
 type st = {
   mutable indent: int;
@@ -97,7 +103,7 @@ let var_mutable (v:ident) (st) =
     | Some Unit -> false
     | Some Infer -> true
     | Some Immutable _ -> false
-  | None -> true (* Globals are mutable by default *)
+  | None ->  true (* Globals are mutable by default *)
 
 let global_imports = ["util.Logger"]
 let global_opens = ["ir"]
@@ -143,10 +149,12 @@ let prints_arg_type (t: var_type) : string =
     | (Type_Constructor (Ident "integer")) -> "BigInt"
     | (Type_Constructor (Ident "boolean")) -> "Boolean"
     | (Type_Tuple l) -> ": (" ^ (String.concat "," (List.map ctype (l)) ) ^ ")"
-    | Type_Constructor (Ident "rt_label") -> "Expr"
     | Type_Constructor (Ident "any") -> "Any"
     | Type_Constructor (Ident "unit") -> "Unit"
-    | Type_Constructor (Ident "rt_sym") -> "Expr"
+    | Type_Constructor (Ident "rt_label") -> "RTLabel"
+    | Type_Constructor (Ident "rt_sym") -> "RTSym" 
+  | Type_Constructor (Ident "rt_expr") -> "Expr"
+    | Type_Constructor (Ident e) -> e 
     | t -> failwith @@ "Unknown arg type: " ^ (pp_type t)
   in
   match t with 
@@ -237,11 +245,12 @@ let rec prints_expr ?(deref:bool=true) e (st:st)  =
       let e = prints_expr e st in
       let i = prints_expr i st in
       let w = prints_expr w st in
-      Printf.sprintf "bvextract(%s,%s,%s, %s)" e i w w
+      let stv = prints_expr state_var.var st in
+      Printf.sprintf "bvextract(%s,%s,%s,%s, %s)" stv e i w w
   | Expr_TApply(f, targs, args) ->
       let deref = not (Bindings.mem f st.extra_functions) in
       let f = name_of_ident f in
-      let args = List.map (fun e -> prints_expr ~deref:deref e st) (targs@args) in
+      let args = List.map (fun e -> prints_expr ~deref:deref e st) (state_var.var::targs@args) in
       f ^ "(" ^ (String.concat ", " (args)) ^ ")"
 
   | Expr_LitString s -> "\"" ^ s ^ "\""
@@ -255,7 +264,8 @@ and default_value t st =
   | Type_Bits w -> Printf.sprintf "BitVecLiteral(0, %s)" (prints_expr w st)
   | Type_Constructor (Ident "boolean") -> "true"
   | Type_Constructor (Ident "integer") -> "BigInt(0)"
-  | Type_Constructor (Ident "rt_label") -> "null"
+  | Type_Constructor (Ident "rt_label") -> "rTLabelDefault"
+  | Type_Constructor (Ident "rt_sym") -> "rTSymDefault"
   | Type_Constructor (Ident "unit") -> "null"
   | Type_Constructor (Ident "any") -> "null"
   | Type_Array(Index_Range(lo, hi),ty) ->
@@ -302,7 +312,7 @@ let write_unsupported st =
 
 let write_call f (targs : typeid list) (args: typeid list) st =
   let f = name_of_ident f in
-  let args = targs @ args in
+  let args = (prints_expr state_var.var st)::(targs@args) in
   let call = f ^ " (" ^ (String.concat "," args) ^ ")" in
   write_line call st
 
@@ -432,16 +442,6 @@ module FunctionSplitter = struct
     method any_rets () = fun_returns || proc_returns
   end
 
-  class mentioned_vars = object
-      inherit nopAslVisitor
-
-      val mutable fvs = IdentSet.empty
-      method result = fvs
-      method! vvar x =
-          (fvs <- IdentSet.add x fvs;
-          SkipChildren)
-  end
-
 (* Replaces a statement list with a a call to a function containing the same statements.
 
   If the statement list contains return statements then a return statement is returned. 
@@ -458,12 +458,13 @@ module FunctionSplitter = struct
     let in_return_context sl = let v = new find_returns  in
       visit_stmts v sl  |> ignore ; v#any_rets () in
     let swap (a,b) = (b,a) in
-    let param_types = List.map swap (Bindings.bindings c.bindings) in
+    let param_types = List.filter (fun (t, i) -> i <> state_var.ident) (List.map swap (Bindings.bindings c.bindings)) in
+    let param_types = (state_var.typ,state_var.ident)::param_types in
     let returning = if (in_return_context sl) then c.return_type else Unit in
     let fname = new_name "split_fun" in
     let targs = [] in
-    let args = List.map snd param_types in
-    let funsig : sc_fun_sig = {rt=(returning); arg_types=param_types; targs=targs; args=args; loc=Unknown; body=sl} in
+    let args = List.map snd (List.tl param_types) in
+    let funsig : sc_fun_sig = {rt=returning; arg_types=param_types; targs=targs; args=args; body=sl} in
     let new_funsig =  (fname , funsig) in
     let call_params = List.map (fun i -> Expr_TApply ((FIdent("as_ref", 0)), [], [Expr_Var i])) args in
     let new_stmt = (match returning with
@@ -481,11 +482,12 @@ module FunctionSplitter = struct
     let returning = Infer in
     let params =  List.map (fun e -> Option.map (fun v -> v, e) (Bindings.find_opt e c.bindings)) (IdentSet.to_list (fv_expr e)) in
     let params = List.concat_map Option.to_list params in
+    let params = (state_var.typ,state_var.ident)::List.filter (fun (t, i) -> i <> state_var.ident) params in
     let targs = [] in
-    let args = List.map snd params in
+    let args = List.map snd (List.tl params) in (* chop off state var since its always added to calls*)
     let call_params = List.map (fun i -> Expr_TApply ((FIdent("as_ref", 0)), [], [Expr_Var i])) args in
     let body = [Stmt_FunReturn (e, Unknown)] in
-    let funsig =  {rt=returning; arg_types=params; targs=targs;args=args; loc=Unknown; body=body} in
+    let funsig =  {rt=returning; arg_types=params; targs=targs; args=args; body=body} in
     let callexpr = Expr_TApply (fname, [], call_params) in
     (callexpr, (fname, funsig))
 
@@ -604,6 +606,10 @@ module FunctionSplitter = struct
       ChangeTo (S_Elsif_Cond (c,sl))
 
     method! vexpr e = ChangeTo (this#split_exp e)
+    (*the generated code is too large with this, type inference seems to do ok without *)
+    (*method! vexpr e = match e with 
+      | Expr_TApply _ -> DoChildren (* to preserve typing of fun returns *)
+      | e -> ChangeTo (this#split_exp e) *)
 
     method split_function (x:unit) = let sl = visit_stmts this (funsig.body) in (sl , extra_funs)
 
@@ -695,8 +701,8 @@ let write_preamble imports opens st =
 let write_epilogue (fid: AST.ident) st =
   Printf.fprintf st.oc "class %s {
 
-  def decode(insn: BitVecLiteral) : Any = {
-    %s(insn)
+  def decode(l: LiftState, insn: BitVecLiteral) : Any = {
+    %s(l, insn)
   }
 }" (plain_ident fid) (name_of_ident fid)
 
@@ -704,18 +710,14 @@ open AST
 
 
 let init_b (u:unit) = Transforms.ScopedBindings.init () 
-let init_st : st = { indent = 0; skip_seq=false;  oc=stdout;  mutable_vars = init_b (); extra_functions = Bindings.empty;} 
-let rinit_st oc st : st =  {st with indent = 0; skip_seq=false;  oc=oc;   mutable_vars = init_b ()} 
+let init_st : st = { indent = 0; skip_seq=false;  oc=stdout;  mutable_vars = init_b (); extra_functions = Bindings.empty}
+let rinit_st oc st : st =  {st with indent = 0; skip_seq=false;  oc=oc;   mutable_vars = init_b ()}  
 
 let build_args (tys: ((var_type * ident)  list)) targs args =
   let targs =  List.map (fun t -> name_of_ident t) targs in 
-  let args =  List.map (fun t -> name_of_ident t) args in 
+  (*let args =  List.map (fun t -> name_of_ident t) args in *)
   let ta = List.map (fun (t, i) -> (name_of_ident i) ^ ": " ^ (prints_arg_type t)) tys in
-  if List.length targs = 0 && List.length args = 0 then "()"
-  else "(" ^ (String.concat "," (targs@ta)) ^ ")" 
-
-let build_args_mut (targs: ident list) (args: ident list) st =
-  List.iter (fun (i) -> write_line (Printf.sprintf "val %s  = Mutable(_%s)\n"  (i)  (i)) st) (targs@args |> List.map name_of_ident)
+  "(" ^ (String.concat "," (targs@ta)) ^ ")" 
 
 let print_write_fn  (name: AST.ident) ((ret_tyo: var_type), (argtypes: ((var_type * ident) list)), targs, args, _, body) st = 
   let open Transforms.ScopedBindings in
@@ -749,7 +751,7 @@ let lift_fsig (fs: Eval.fun_sig) : sc_fun_sig =
   let rt = match (fnsig_get_rt fs) with
     | Some x -> Immutable x
     | None -> Unit
-  in {rt=rt; arg_types=params; targs=(fnsig_get_targs fs); args=(fnsig_get_args fs); loc=Unknown; body=(fnsig_get_body fs)}
+  in {rt=rt; arg_types=(state_var.typ,state_var.ident)::params; targs=(fnsig_get_targs fs); args=(fnsig_get_args fs); body=(fnsig_get_body fs)}
 
 
 (* Write an instruction file, containing just the behaviour of one instructions *)
@@ -792,6 +794,5 @@ let run (dfn : ident) (dfnsig : ty option * 'a * ident list * ident list * 'b * 
   let files = Bindings.fold (fun fn fnsig acc -> (write_instr_file fn (lift_fsig fnsig) dir st)::acc) fns [] in
   let files = (write_test_file tests dir st)::files in
   write_decoder_file dfn (lift_fsig dfnsig) files dir st |> ignore ; 
-(*  printfundiff st ; *)
   ()
 

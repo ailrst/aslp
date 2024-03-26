@@ -41,6 +41,9 @@ let problematic_enc = [
   (* Need to extend RemoveUnsupported to remove all undesirable global variables & fields *)
   "aarch64_system_register_system";
   "aarch64_system_register_cpsr";
+
+  "aarch64_vector_arithmetic_unary_special_sqrt_est_fp16_simd";
+  "aarch64_vector_shift_left_sat_simd";
 ]
 
 (* Model doesn't need these globals *)
