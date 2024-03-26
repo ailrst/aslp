@@ -42,9 +42,7 @@ let problematic_enc = [
   "aarch64_system_register_system";
   "aarch64_system_register_cpsr";
 
-  (* too big after splitting *)
-  "aarch64_integer_crc";
-  "aarch64_vector_arithmetic_binary_element_dotp";
+  (* too big for scala after outlining branches and large expressions *)
   "aarch64_vector_arithmetic_unary_special_sqrt_est_fp16_simd";
   "aarch64_vector_shift_left_sat_simd";
   (* Too big for scala 

@@ -16,6 +16,7 @@ module EmbeddingLanguage = struct
     | Mutable of ty
     | Immutable of ty
     | Unit
+    | Infer
 
   type sc_fun_sig = {
     rt: var_type ;
@@ -104,6 +105,7 @@ let var_mutable (v:ident) (st) =
   match (find_def st.mutable_vars v) with 
     | Some Mutable _ -> true
     | Some Unit -> false
+    | Some Infer -> true
     | Some Immutable _ -> false
   | None -> true (* Globals are mutable by default *)
 
@@ -169,6 +171,7 @@ let prints_arg_type (t: var_type) : string =
   match t with 
       | Mutable v -> Printf.sprintf "Mutable[%s]" (ctype v)
       | Immutable v -> ctype v
+      | Infer -> ""
       | Unit -> "Unit"
 
 
@@ -257,8 +260,8 @@ let rec prints_expr ?(deref:bool=true) e (st:st)  =
       Printf.sprintf "((%s) - ( (%s) * ((%s) / (%s))))"  x y x y 
 
   (* Other operations *)
-  | Expr_TApply(FIdent("boxed", 0), [], [a]) -> Printf.sprintf "%s" (prints_expr a st ~deref:false) 
-    (*boxed is only output by backend to idicate not to deref pointers*)
+  | Expr_TApply(FIdent("as_ref", 0), [], [a]) -> Printf.sprintf "%s" (prints_expr a st ~deref:false) 
+    (*as_ref is only output by backend to idicate not to deref pointers*)
   | Expr_LitBits b -> Printf.sprintf "BitVecLiteral(BigInt(\"%s\", 2), %d)" b (String.length b) 
   | Expr_Slices(e,[Slice_LoWd(i,w)]) ->
       let e = prints_expr e st in
@@ -550,47 +553,55 @@ module FunctionSplitter = struct
   let stmt_list_to_function (c: split_ctx) (sl:stmt list)(*: stmt *) = 
     let swap (a,b) = (b,a) in
     let param_types = List.map swap (Bindings.bindings c.bindings) in
-  (* Need to figure out which statements to deref across the call
-  let assigned = assigned_vars_of_stmts (sl) in
-  let params_types = List.map (fun (t,i) -> if (IdentSet.mem i assigned) then Mutable t,i else Immutable t, i) (fnsig_get_typed_args fs) in
-        *)
-
-    (*let param_types : (var_type * ident) list = List.concat_map (fun i -> 
-      (Bindings.find_opt i c.bindings |> 
-        Option.map (fun o -> (o,i)) |> 
-        Option.to_list)) 
-      (IdentSet.to_list params) in *)
-
     let returning = if (in_return_context sl) then c.return_type else Unit in
     let fname = new_name "split_fun" in
     let targs = [] in
     let args = List.map snd param_types in
     let funsig : sc_fun_sig = {rt=(returning); arg_types=param_types; targs=targs; args=args; loc=Unknown; body=sl} in
     let new_funsig =  (fname , funsig) in
-    let call_params = List.map (fun i -> Expr_TApply ((FIdent("boxed", 0)), [], [Expr_Var i])) args in
+    let call_params = List.map (fun i -> Expr_TApply ((FIdent("as_ref", 0)), [], [Expr_Var i])) args in
     let new_stmt = (match returning with
       | Immutable x -> Some None
       | Mutable x -> Some None
+      | Infer  -> Some None
       | Unit -> None)
      |> (function 
         | Some _ -> Stmt_FunReturn ((Expr_TApply (fname, targs, call_params)), Unknown)
         | None -> Stmt_TCall (fname,targs,call_params, Unknown))
     in (new_stmt, new_funsig)
 
+  let expr_to_function (c: split_ctx) (e: expr)  = 
+    let fname = new_name "split_expr" in
+    let returning = Infer in
+    let params =  List.map (fun e -> Option.map (fun v -> v, e) (Bindings.find_opt e c.bindings)) (IdentSet.to_list (fv_expr e)) in
+    let params = List.concat_map Option.to_list params in
+    let targs = [] in
+    let args = List.map snd params in
+    let call_params = List.map (fun i -> Expr_TApply ((FIdent("as_ref", 0)), [], [Expr_Var i])) args in
+    let body = [Stmt_FunReturn (e, Unknown)] in
+    let funsig =  {rt=returning; arg_types=params; targs=targs;args=args; loc=Unknown; body=body} in
+    let callexpr = Expr_TApply (fname, [], call_params) in
+    (callexpr, (fname, funsig))
+
 
   class stmt_counter = object(this)
     inherit Asl_visitor.nopAslVisitor
     val mutable stmt_count: int  = 0
+    val mutable expr_count: int  = 0
 
     method !vstmt s = stmt_count <- stmt_count + 1; DoChildren
 
+    method !vexpr s = expr_count <- expr_count + 1; DoChildren
+    
     method count (s:stmt) : int = stmt_count <- 0; (visit_stmt this s) |> ignore; stmt_count
+
+    method expr_count (e:expr) : int = expr_count <- 0; (visit_expr this e) |> ignore ; expr_count
   end
 
   let count_stmts_list (s:stmt list) : int list = List.map ((new stmt_counter)#count) s
   let count_stmts (s:stmt) : int = (new stmt_counter)#count s
 
-  let split_function_on_size_threshold ctx sl thresh = 
+  let outline_function_on_size_threshold ctx sl thresh = 
     let sum x = List.fold_left (fun a b -> (a + b)) 0 x in
     let branch_weight = compose count_stmts_list sum in
     let stmt_weights = sl |> List.map (fun s -> match s with 
@@ -604,6 +615,10 @@ module FunctionSplitter = struct
       let (f,s) = stmt_list_to_function ctx sl 
       in ([f], [s])
 
+  let outline_expr_on_size_threshold ctx (thresh:int) (e:expr) = 
+    let c = new stmt_counter in 
+    let c = c#expr_count e in
+    if (c > thresh) then let (e,f) = expr_to_function ctx e in (e, [f]) else (e, [])
 
   class branch_outliner (funsig: sc_fun_sig) (outline_thresh:int) = object(this)
     inherit Asl_visitor.nopAslVisitor
@@ -620,42 +635,51 @@ module FunctionSplitter = struct
 
     method split_sl sl = 
       let ctx = {return_type = funsig.rt; bindings = current_scope_bindings scoped_bindings} in
-      let t,nf = split_function_on_size_threshold ctx sl outline_thresh in this#add_fun nf ; 
-      this#add_fun nf ; 
+      let t,nf = outline_function_on_size_threshold ctx sl outline_thresh
+      in this#add_fun nf;
       t
+
+    method split_exp e = 
+      let ctx = {return_type = funsig.rt; bindings = current_scope_bindings scoped_bindings} in
+      let ne,nf = outline_expr_on_size_threshold ctx (outline_thresh * 10) e 
+      in this#add_fun nf;
+      ne 
+
 
     method! enter_scope ss = push_scope scoped_bindings ()
     method! leave_scope ss = pop_scope scoped_bindings ()
 
     method! vstmt s =
       match s with
-        | Stmt_VarDeclsNoInit(ty, vs, loc) ->
-            List.iter (fun f -> add_bind scoped_bindings f (Mutable ty)) vs; 
-            DoChildren
-        | Stmt_VarDecl(ty, v, i, loc) ->
-            add_bind scoped_bindings v (Mutable ty) ;
-            DoChildren
-        | Stmt_ConstDecl(ty, v, i, loc) ->
-            add_bind scoped_bindings v (Immutable ty) ;
-            DoChildren
-        | Stmt_If (c, t, els, e, loc) ->
-            let stmt_cost = count_stmts s in
-            if (stmt_cost < 10) then SkipChildren else 
-              let c'   = visit_expr this c in
-              (* visit each statement list and then maybe outline it *)
-              let t'   = visit_stmts this t in
-              let t' = this#split_sl t' in
-              let els' = mapNoCopy (visit_s_elsif this ) els in
-              let e'   = visit_stmts this e in
-              let e' = this#split_sl e' in
-              ChangeTo (Stmt_If (c', t', els', e', loc))
-        (* Statements with child scopes that shouldn't appear towards the end of transform pipeline *)
-        | Stmt_Case _ -> failwith "(FixRedefinitions) case not expected"
-        | Stmt_For _ -> failwith "(FixRedefinitions) for not expected"
-        | Stmt_While _ -> failwith "(FixRedefinitions) while not expected"
-        | Stmt_Repeat _ -> failwith "(FixRedefinitions) repeat not expected"
-        | Stmt_Try _ -> failwith "(FixRedefinitions) try not expected"
-        | _ -> DoChildren
+      | Stmt_VarDeclsNoInit(ty, vs, loc) ->
+        List.iter (fun f -> add_bind scoped_bindings f (Mutable ty)) vs; 
+        DoChildren
+      | Stmt_VarDecl(ty, v, i, loc) ->
+        add_bind scoped_bindings v (Mutable ty) ;
+        DoChildren
+      | Stmt_ConstDecl(ty, v, i, loc) ->
+        add_bind scoped_bindings v (Immutable ty) ;
+        DoChildren
+      | Stmt_If (c, t, els, e, loc) ->
+        ChangeDoChildrenPost (Stmt_If (c, t, els, e, loc), (function 
+          | Stmt_If (c, t, els, e, loc) ->
+            let c'   = visit_expr this c in
+            (* visit each statement list and then maybe outline it *)
+            let t'   = visit_stmts this t in
+            let t' = this#split_sl t' in
+            let els' = mapNoCopy (visit_s_elsif this ) els in
+            let e'   = visit_stmts this e in
+            let e' = this#split_sl e' in
+            Stmt_If (c', t', els', e', loc)
+          | _ -> s
+          )) 
+      (* Statements with child scopes that shouldn't appear towards the end of transform pipeline *)
+      | Stmt_Case _ -> failwith "(FixRedefinitions) case not expected"
+      | Stmt_For _ -> failwith "(FixRedefinitions) for not expected"
+      | Stmt_While _ -> failwith "(FixRedefinitions) while not expected"
+      | Stmt_Repeat _ -> failwith "(FixRedefinitions) repeat not expected"
+      | Stmt_Try _ -> failwith "(FixRedefinitions) try not expected"
+      | _ -> DoChildren
 
     method! vs_elsif e = let c,e = match e with 
       | S_Elsif_Cond (c, sl) -> c,sl in
@@ -663,6 +687,7 @@ module FunctionSplitter = struct
       let sl = this#split_sl sl in
       ChangeTo (S_Elsif_Cond (c,sl))
 
+    method! vexpr e = ChangeTo (this#split_exp e)
 
     method split_function (x:unit) = let sl = visit_stmts this (funsig.body) in (sl , extra_funs)
 
@@ -871,11 +896,12 @@ let print_write_fn  (name: AST.ident) ((ret_tyo: var_type), (argtypes: ((var_typ
     args = List.map (fun (t, _) -> Some t) (argtypes)} (st.output_fun) ; *)
   let wargs = build_args argtypes targs args in
   let ret = prints_arg_type ret_tyo in
+  let ret = if (ret <> "") then (": " ^ ret) else "" in
   (* bind params *)
   push_scope st.mutable_vars () ; 
   List.iter (fun (a,b) -> add_bind st.mutable_vars b a) argtypes  ;
 
-  Printf.fprintf st.oc "def %s %s : %s = {\n" (name_of_ident name) wargs ret;
+  Printf.fprintf st.oc "def %s %s %s = {\n" (name_of_ident name) wargs ret;
   write_stmts body st;
   Printf.fprintf st.oc "\n}\n";
 
