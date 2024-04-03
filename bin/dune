@@ -33,6 +33,15 @@
  (flags (-cclib -lstdc++))
  (libraries libASL unix))
 
+
+(executable
+ (name offline_comparison)
+ (public_name asloff-comparison)
+ (modes exe)
+ (modules offline_comparison)
+ (flags (-cclib -lstdc++))
+ (libraries libASL offlineASL))
+
 (executable
  (name offline_coverage)
  (public_name asloff-coverage)
