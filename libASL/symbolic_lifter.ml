@@ -288,6 +288,59 @@ module DecoderCleanup = struct
     dsig
 end
 
+
+module GCCounter = struct 
+  open Asl_visitor
+
+  class gen_counter = object(this)
+    inherit Asl_visitor.nopAslVisitor
+    val mutable stmt_count: int  = 0
+    val mutable gen_count: int  = 0
+    val mutable branch_count: int  = 0
+    val mutable decl_count: int  = 0
+
+
+    method !vstmt s = match s with
+      | Stmt_TCall(FIdent(n, _), _, _, _) when (String.starts_with ~prefix:"gen_branch" (n)) -> gen_count <- gen_count + 1 ; branch_count <- branch_count + 1 ; DoChildren
+      | Stmt_TCall(FIdent(n, _), _, _, _) when (String.starts_with ~prefix:"decl" (n)) -> gen_count <- gen_count + 1 ; decl_count <- decl_count + 1 ; DoChildren
+      | Stmt_If (c, t, els, e, loc) ->
+        let (vc, vt, ve) = (new gen_counter, new gen_counter, new gen_counter) in
+        let _   = visit_expr vc c in
+        let _   = visit_stmts vt t in
+        let vels: gen_counter list = List.map (fun _ -> new gen_counter) els in
+        let _ = List.map2 (visit_s_elsif) vels els in
+        let _   = visit_stmts ve e in
+        let expr_counts : int list = (List.map (fun x -> x#gexpr_count) ([vc;vt;ve]@vels)) in
+        let br_counts : int list = (List.map (fun x -> x#gbranch_count) ([vc;vt;ve]@vels)) in
+        let decl_counts : int list = (List.map (fun x -> x#gdecl_count) ([vc;vt;ve]@vels)) in
+        gen_count <- gen_count + (List.fold_left max 0 expr_counts);
+        branch_count <- branch_count + (List.fold_left max 0 br_counts);
+        decl_count <- decl_count + (List.fold_left max 0 decl_counts);
+        SkipChildren
+        | _ -> DoChildren
+
+
+    method !vexpr s = match s with 
+      | Expr_TApply(FIdent(n, _), _, _) when (String.starts_with ~prefix:"gen_branch" (n)) -> gen_count <- gen_count + 1 ; branch_count <- branch_count + 1 ; DoChildren
+      | Expr_TApply(FIdent(n, _), _, _) when (String.starts_with ~prefix:"decl" (n)) -> gen_count <- gen_count + 1 ; decl_count <- decl_count + 1 ; DoChildren
+      | _ -> DoChildren
+    
+
+  
+    method count_gen (s:stmt list) : int = 
+      stmt_count <- 0; gen_count <- 0; 
+      (visit_stmts this s) |> ignore; 
+      this#gexpr_count
+
+    method expr_count (e:expr) : int = gen_count <- 0; (visit_expr this e) |> ignore ; gen_count
+    method gexpr_count = gen_count
+    method gbranch_count = branch_count 
+    method gdecl_count = decl_count
+  end
+end
+
+
+
 let unsupported_inst tests instrs f =
   not (Bindings.mem f tests || Bindings.mem f instrs)
 
@@ -359,6 +412,8 @@ let run iset pat env =
   List.iter (fun (fn,c) -> Printf.printf "  %d\t:\t%s\n" c (name_of_FIdent fn)) l;
   Printf.printf "\n";
 
+
+
   Printf.printf "Stage 6: Cleanup\n";
   (* TODO: Defer *)
   let tests = Bindings.map (fun s -> fnsig_upd_body (Transforms.RemoveUnused.remove_unused IdentSet.empty) s) tests in
@@ -372,5 +427,18 @@ let run iset pat env =
   let dsig = fnsig_upd_body (DecoderCleanup.run (unsupported_inst tests offline_fns)) dsig in
   let dsig = fnsig_upd_body (Transforms.RemoveUnused.remove_unused IdentSet.empty) dsig in
   Printf.printf "\n";
+  let fnbodys = ((List.map (fun (i,fs) -> i, fnsig_get_body fs)  (Bindings.bindings offline_fns))) in
+  let visitors =  (List.map (fun (i, b) -> let v = new GCCounter.gen_counter in ignore (visit_stmts v b); (i, v)) fnbodys) in
+  let branches_bounds = Bindings.of_list @@ List.map (fun (i, b) -> i, b#gbranch_count) visitors in
+  let decls_bounds = Bindings.of_list @@ List.map (fun (i, b) -> i, b#gdecl_count) visitors in
+  let complexity_bounds = List.map (fun (i, b) -> i, b#gexpr_count) visitors in
+  let complexity_bounds = List.sort (fun (i, ca) (ii, cb) -> compare ca cb) complexity_bounds in
+  let oc = open_out "insn_complexity_bounds.csv" in
+  Printf.printf "Runtime bounds on instruction outputs\ninstruction,all gens,branches,declarations\n" ;
+  List.iter (fun (i, c) -> 
+    output_string oc (Printf.sprintf "%s,%d,%d,%d\n" (name_of_FIdent i) (c) (Bindings.find i branches_bounds) (Bindings.find i decls_bounds));
+    (Printf.printf "%d\t%d\t%d\t%s\n" (c) (Bindings.find i branches_bounds) (Bindings.find i decls_bounds) (name_of_FIdent i) );
+  ) complexity_bounds ;
+  close_out oc;
 
   (did,dsig,tests,offline_fns)

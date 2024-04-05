@@ -1493,7 +1493,7 @@ let dis_decode_entry (env: Eval.Env.t) ((lenv,globals): env) (decode: decode_cas
     let stmts' = Transforms.RedundantSlice.do_transform Bindings.empty stmts' in
     let stmts' = Transforms.StatefulIntToBits.run (enum_types env) stmts' in
     let stmts' = Transforms.IntToBits.ints_to_bits stmts' in
-    let stmts' = Transforms.CommonSubExprElim.do_transform stmts' in
+    (*let stmts' = Transforms.CommonSubExprElim.do_transform stmts' in (* disabled for comparison to offline *)*)
     let stmts' = Transforms.CopyProp.copyProp stmts' in
     let stmts' = Transforms.RedundantSlice.do_transform bindings stmts' in
     let stmts' = Transforms.RemoveUnused.remove_unused globals @@ stmts' in

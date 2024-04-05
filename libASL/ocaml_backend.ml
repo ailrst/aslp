@@ -389,4 +389,4 @@ let run dfn dfnsig tests fns dir =
   let files = Bindings.fold (fun fn fnsig acc -> (write_instr_file fn fnsig dir)::acc) fns [] in
   let files = (write_test_file tests dir)::files in
   let decoder = write_decoder_file dfn dfnsig files dir in
-  write_dune_file (decoder::files@global_deps) dir
+  write_dune_file (decoder::files@global_deps) dir 

@@ -119,6 +119,7 @@ class stmt_counter = object(this)
 
   method expr_count (e:expr) : int = expr_count <- 0; (visit_expr this e) |> ignore ; expr_count
   method gexpr_count = expr_count
+  method gstmt_count = stmt_count 
 end
 
 let sl_complexity(sl:stmt list) : int = let s = new stmt_counter in visit_stmts s (sl) |> ignore ; s#gexpr_count  
