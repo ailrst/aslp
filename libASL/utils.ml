@@ -247,6 +247,7 @@ let span_to_float_s delta = (ns_to_s (Mtime.Span.to_float_ns delta))
 
 module Timer = struct 
   let make (u:unit) = Mtime_clock.counter () 
+  let get_delta_float_seconds (t : Mtime_clock.counter) = span_to_float_s @@ Mtime_clock.count t
   let print_checkpoint t x : Mtime_clock.counter = Printf.printf "%s : %f s\n" x (span_to_float_s @@ Mtime_clock.count t) ; (Mtime_clock.counter ())
 end
 

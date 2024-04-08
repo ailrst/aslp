@@ -377,6 +377,7 @@ let run iset pat env =
   let timer = Utils.Timer.make () in
   Printf.printf "Stage 1: Mock decoder & instruction encoding definitions\n";
   let ((did,dsig),tests,instrs) = Decoder_program.run iset pat env problematic_enc in
+  let s1 = Utils.Timer.get_delta_float_seconds timer in
   let timer = Utils.Timer.print_checkpoint timer  "Stage 1"  in
   Printf.printf "  Collected %d instructions\n\n" (Bindings.cardinal instrs);
 
@@ -384,6 +385,7 @@ let run iset pat env =
   let frontier = get_inlining_frontier in
   let (callers, reachable) = Call_graph.run (bindings_domain instrs) frontier env in
   let fns = IdentSet.fold (fun id acc -> Bindings.add id (Eval.Env.getFun Unknown env id) acc) reachable Bindings.empty in
+  let s2 = Utils.Timer.get_delta_float_seconds timer in
   let timer = Utils.Timer.print_checkpoint timer  "Stage 2" in
   Printf.printf "  Collected %d functions\n\n" (Bindings.cardinal fns);
 
@@ -392,12 +394,14 @@ let run iset pat env =
   let fns = Bindings.map (fnsig_upd_body (Transforms.RemoveTempBVs.do_transform false)) fns in
   (* Remove calls to problematic functions & impdefs *)
   let fns = Bindings.map (fnsig_upd_body (RemoveUnsupported.run unsupported env)) fns in
+  let s3 = Utils.Timer.get_delta_float_seconds timer in
   let timer = Utils.Timer.print_checkpoint timer  "Stage 3" in
   Printf.printf "\n";
 
   Printf.printf "Stage 4: Specialisation\n";
   (* Run requirement collection over the full set *)
   let fns = Req_analysis.run fns callers in
+  let s4 = Utils.Timer.get_delta_float_seconds timer in
   let timer = Utils.Timer.print_checkpoint timer  "Stage 4" in
   Printf.printf "\n";
 
@@ -409,6 +413,7 @@ let run iset pat env =
   let fns = Bindings.filter_map (fun fn fnsig ->
     if not (Bindings.mem fn instrs) then None
     else Option.map (fnsig_set_body fnsig) (dis_wrapper fn fnsig env')) fns in
+  let s5 = Utils.Timer.get_delta_float_seconds timer in
   Utils.Timer.print_checkpoint timer  "Stage 5" |> ignore ;
   Printf.printf "  Succeeded for %d instructions\n\n" (Bindings.cardinal fns);
 
@@ -423,6 +428,7 @@ let run iset pat env =
   Printf.printf "Stage 6: Cleanup\n";
   (* TODO: Defer *)
   let tests = Bindings.map (fun s -> fnsig_upd_body (Transforms.RemoveUnused.remove_unused IdentSet.empty) s) tests in
+  let s6 = Utils.Timer.get_delta_float_seconds timer in
   let timer = Utils.Timer.print_checkpoint timer  "Stage 6" in
   Printf.printf "\n";
 
@@ -433,6 +439,7 @@ let run iset pat env =
   let offline_fns = Bindings.mapi (fun k -> fnsig_upd_body (Offline_opt.DeadContextSwitch.run k)) offline_fns in
   let dsig = fnsig_upd_body (DecoderCleanup.run (unsupported_inst tests offline_fns)) dsig in
   let dsig = fnsig_upd_body (Transforms.RemoveUnused.remove_unused IdentSet.empty) dsig in
+  let s7 = Utils.Timer.get_delta_float_seconds timer in
   Utils.Timer.print_checkpoint timer  "Stage 7-8"  |> ignore;
   Printf.printf "\n";
 
@@ -444,10 +451,11 @@ let run iset pat env =
   let complexity_bounds = List.rev @@ List.sort (fun (i, ca) (ii, cb) -> compare ca cb) complexity_bounds in
   let oc = open_out "insn_complexity_bounds.csv" in
   Printf.printf "Runtime bounds on instruction outputs (counting f_gens())\nall\tbranch\tdecls\tinstruction\n" ;
+  output_string oc "instruction,allgens,branches,decls\n" ;
   List.iter (fun (i, c) -> 
     output_string oc (Printf.sprintf "%s,%d,%d,%d\n" (name_of_FIdent i) (c) (Bindings.find i branches_bounds) (Bindings.find i decls_bounds));
     (Printf.printf "%d\t%d\t%d\t%s\n" (c) (Bindings.find i branches_bounds) (Bindings.find i decls_bounds) (name_of_FIdent i) );
   ) complexity_bounds ;
   close_out oc;
-
+  Printf.printf "Gen times\nstage\tseconds\n1\t%f\n2\t%f\n3\t%f\n4\t%f\n5\t%f\n6\t%f\n7\t%f" s1 s2 s3 s4 s5 s6 s7 ;
   (did,dsig,tests,offline_fns)
