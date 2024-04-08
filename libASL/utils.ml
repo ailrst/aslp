@@ -240,6 +240,18 @@ let pp_list f xs = Printf.sprintf "[%s]" (String.concat " ; " (List.map f xs))
 
 let pp_pair l r (x,y) = Printf.sprintf "(%s, %s)" (l x) (r y)
 
+
+let ns_to_s delta = (Float.div (delta) 1000000000.0)
+let ns_to_ms delta = (Float.div (delta) 1000000.0)
+let span_to_float_s delta = (ns_to_s (Mtime.Span.to_float_ns delta))
+
+module Timer = struct 
+  let make (u:unit) = Mtime_clock.counter () 
+  let print_checkpoint t x : Mtime_clock.counter = Printf.printf "%s : %f s\n" x (span_to_float_s @@ Mtime_clock.count t) ; (Mtime_clock.counter ())
+end
+
 (****************************************************************
  * End
  ****************************************************************)
+
+

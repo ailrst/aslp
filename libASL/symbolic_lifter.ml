@@ -374,14 +374,17 @@ let dis_wrapper fn fnsig env =
 
 (* Produce a lifter for the desired parts of the instruction set *)
 let run iset pat env =
+  let timer = Utils.Timer.make () in
   Printf.printf "Stage 1: Mock decoder & instruction encoding definitions\n";
   let ((did,dsig),tests,instrs) = Decoder_program.run iset pat env problematic_enc in
+  let timer = Utils.Timer.print_checkpoint timer  "Stage 1"  in
   Printf.printf "  Collected %d instructions\n\n" (Bindings.cardinal instrs);
 
   Printf.printf "Stage 2: Call graph construction\n";
   let frontier = get_inlining_frontier in
   let (callers, reachable) = Call_graph.run (bindings_domain instrs) frontier env in
   let fns = IdentSet.fold (fun id acc -> Bindings.add id (Eval.Env.getFun Unknown env id) acc) reachable Bindings.empty in
+  let timer = Utils.Timer.print_checkpoint timer  "Stage 2" in
   Printf.printf "  Collected %d functions\n\n" (Bindings.cardinal fns);
 
   Printf.printf "Stage 3: Simplification\n";
@@ -389,11 +392,13 @@ let run iset pat env =
   let fns = Bindings.map (fnsig_upd_body (Transforms.RemoveTempBVs.do_transform false)) fns in
   (* Remove calls to problematic functions & impdefs *)
   let fns = Bindings.map (fnsig_upd_body (RemoveUnsupported.run unsupported env)) fns in
+  let timer = Utils.Timer.print_checkpoint timer  "Stage 3" in
   Printf.printf "\n";
 
   Printf.printf "Stage 4: Specialisation\n";
   (* Run requirement collection over the full set *)
   let fns = Req_analysis.run fns callers in
+  let timer = Utils.Timer.print_checkpoint timer  "Stage 4" in
   Printf.printf "\n";
 
   Printf.printf "Stage 5: Disassembly\n";
@@ -404,6 +409,7 @@ let run iset pat env =
   let fns = Bindings.filter_map (fun fn fnsig ->
     if not (Bindings.mem fn instrs) then None
     else Option.map (fnsig_set_body fnsig) (dis_wrapper fn fnsig env')) fns in
+  Utils.Timer.print_checkpoint timer  "Stage 5" |> ignore ;
   Printf.printf "  Succeeded for %d instructions\n\n" (Bindings.cardinal fns);
 
   Printf.printf "Stmt Counts\n";
@@ -413,10 +419,11 @@ let run iset pat env =
   Printf.printf "\n";
 
 
-
+  let timer = Utils.Timer.make () in
   Printf.printf "Stage 6: Cleanup\n";
   (* TODO: Defer *)
   let tests = Bindings.map (fun s -> fnsig_upd_body (Transforms.RemoveUnused.remove_unused IdentSet.empty) s) tests in
+  let timer = Utils.Timer.print_checkpoint timer  "Stage 6" in
   Printf.printf "\n";
 
   (* Perform offline PE *)
@@ -426,15 +433,17 @@ let run iset pat env =
   let offline_fns = Bindings.mapi (fun k -> fnsig_upd_body (Offline_opt.DeadContextSwitch.run k)) offline_fns in
   let dsig = fnsig_upd_body (DecoderCleanup.run (unsupported_inst tests offline_fns)) dsig in
   let dsig = fnsig_upd_body (Transforms.RemoveUnused.remove_unused IdentSet.empty) dsig in
+  Utils.Timer.print_checkpoint timer  "Stage 7-8"  |> ignore;
   Printf.printf "\n";
+
   let fnbodys = ((List.map (fun (i,fs) -> i, fnsig_get_body fs)  (Bindings.bindings offline_fns))) in
   let visitors =  (List.map (fun (i, b) -> let v = new GCCounter.gen_counter in ignore (visit_stmts v b); (i, v)) fnbodys) in
   let branches_bounds = Bindings.of_list @@ List.map (fun (i, b) -> i, b#gbranch_count) visitors in
   let decls_bounds = Bindings.of_list @@ List.map (fun (i, b) -> i, b#gdecl_count) visitors in
   let complexity_bounds = List.map (fun (i, b) -> i, b#gexpr_count) visitors in
-  let complexity_bounds = List.sort (fun (i, ca) (ii, cb) -> compare ca cb) complexity_bounds in
+  let complexity_bounds = List.rev @@ List.sort (fun (i, ca) (ii, cb) -> compare ca cb) complexity_bounds in
   let oc = open_out "insn_complexity_bounds.csv" in
-  Printf.printf "Runtime bounds on instruction outputs\ninstruction,all gens,branches,declarations\n" ;
+  Printf.printf "Runtime bounds on instruction outputs (counting f_gens())\nall\tbranch\tdecls\tinstruction\n" ;
   List.iter (fun (i, c) -> 
     output_string oc (Printf.sprintf "%s,%d,%d,%d\n" (name_of_FIdent i) (c) (Bindings.find i branches_bounds) (Bindings.find i decls_bounds));
     (Printf.printf "%d\t%d\t%d\t%s\n" (c) (Bindings.find i branches_bounds) (Bindings.find i decls_bounds) (name_of_FIdent i) );

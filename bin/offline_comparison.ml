@@ -3,9 +3,10 @@ open Testing
 open Asl_ast
 open Asl_visitor
 open Value
+open Utils
 
 
-let fr = "results.marshall"
+
 
 let dis_online env (iset: string) (op: int): (stmt list*Mtime.span) opresult =
   let c = Mtime_clock.counter () in
@@ -18,6 +19,56 @@ let dis_online env (iset: string) (op: int): (stmt list*Mtime.span) opresult =
     Result.Ok (stmts, ts)
   with
     | e -> Result.Error (Op_DisFail e)
+
+
+module NoCSV  = struct 
+  open List 
+
+  type cell = 
+    | FloatC of float
+    | IntC of int
+    | StringC of string
+
+  type row  = cell list 
+
+  type table = {
+    header: string list;
+    rows:row list 
+  }
+
+  let delim = "\t"
+
+  let cell_to_csv (c:cell)  = match c with 
+    | FloatC f -> Printf.sprintf "%f" f
+    | IntC f -> Printf.sprintf "%d" f
+    | StringC f -> Printf.sprintf "%s" f
+
+  let make headers rows = {
+    header = headers;
+    rows = rows
+    }
+
+  let row_to_csv r = String.concat delim (List.map cell_to_csv (r)) 
+
+  let to_csv (t:table) = (String.concat delim t.header) ^ "\n" ^ (String.concat "\n" (List.map row_to_csv t.rows))
+
+  let trans b (x: 'a list list ) : 'a list list = 
+    let rec tr acc (rest: 'a list list)  = 
+      match rest with 
+        | hd::tl -> 
+          (match hd with 
+            | [] -> tr acc tl
+            | hd -> 
+              let col = hd in
+              let rest = tl in
+              let cc = List.map2 (fun x y -> x@[y]) acc col in
+              tr cc rest)
+        | [] -> acc
+    in tr (List.map (fun _ -> []) (List.hd x)) x
+
+  let add_columns (t:table) (cols:cell list list) = 
+    {t with rows = (trans t.rows cols)}
+end
 
 
 let dis_offline (op: int): (stmt list * Mtime.span) opresult =
@@ -89,11 +140,6 @@ let count_branch (s:stmt list) : int =
   (v#gbr_count)
 
 
-let loadr ()  = 
-  Printf.printf "Loading marhsalled\n";
-  let ic = open_in fr in
-  let res : resultstype  = Marshal.from_channel ic in
-  res
 
 let op_test_opcode (env: Env.t) (iset: string) (op: int) =
   let disstmts = dis_online env iset op in
@@ -163,9 +209,6 @@ let rec process_command tcenv env cmd =
   | _ -> Printf.printf "Ignoring: %s\n" cmd
 
 
-let ns_to_s delta = (Float.div (delta) 1000000000.0)
-let ns_to_ms delta = (Float.div (delta) 1000000.0)
-let span_to_float_s delta = (ns_to_s (Mtime.Span.to_float_ns delta))
 
 let x = ref None
 
@@ -214,39 +257,6 @@ let get_opcode op =
 
 let all_insn_opcodes (u:unit) = 
   let _,_,_,ops = get_lifter () in ops
-
-
-let do_lift () = 
-  let opt_verbose = ref true in
-  let env = match Eval.aarch64_evaluation_environment ~verbose:!opt_verbose () with
-  | Some e -> e
-  | _ -> failwith "Unable to build evaluation environment." in
-  let patterns = [
-    "aarch64_integer.+";
-    "aarch64_branch.+";
-    "aarch64_float_.+";
-    "aarch64_vector_arithmetic_binary.+";
-    "aarch64_vector_(?!arithmetic_binary).+";
-    "aarch64_memory_.+"
-  ]
-  in
-  let filenames = Option.get Eval.aarch64_asl_files in
-  let prj_files = List.filter (fun f -> Utils.endswith f ".prj") (snd filenames) in
-  let tcenv = Tcheck.Env.mkEnv Tcheck.env0 in
-  List.iter (fun f -> process_command tcenv env (":project " ^ f)) prj_files;
-  let ress : resultstype = (List.concat_map (fun instr -> run opt_verbose instr env) patterns) in
-  let oc = open_out fr in
-  Marshal.to_channel oc ress [];
-  close_out oc;
-  ress
-
-
-  (*
-let group_list (k: 'b -> 'a) (l: 'b list) : ('a * 'b list) list   = 
-  let keys : 'a list = Utils.nub (List.map (k) l) in
-  let grouped = List.map (fun key -> (key, List.find_all (fun e -> (k e) = key) l)) keys in
-  grouped
-        *)
 
 
 let group_list (k: 'b -> string) (l: 'b list) : ('b list) StringMap.t = 
@@ -354,7 +364,7 @@ let fmemoed name (fbfn : unit -> 'a) =
   
 
 
-let do_analysis tblname (online_by_insgrp : grouped_res) offline_by_insgroup : unit = 
+let do_analysis tblname (online_by_insgrp : grouped_res) offline_by_insgroup  = 
   let passed_on = num_compiled_by_insn online_by_insgrp in
   let passed_off = num_compiled_by_insn offline_by_insgroup in
   let failed_on = num_failed_by_insn online_by_insgrp in
@@ -381,7 +391,6 @@ let do_analysis tblname (online_by_insgrp : grouped_res) offline_by_insgroup : u
   let online_by_insgrp = allowedop_filter online_by_insgrp in
   let offline_by_insgroup  = allowedop_filter offline_by_insgroup in
 
-
   let toton = total_tm_by_insn  online_by_insgrp in
   let totoff = total_tm_by_insn offline_by_insgroup in
   let to_secs_float x = StringMap.to_list x |>  List.map (fun (k, v) -> k, ns_to_ms (Int64.to_float v)) |> StringMap.of_list in
@@ -395,15 +404,14 @@ let do_analysis tblname (online_by_insgrp : grouped_res) offline_by_insgroup : u
   let on_complexity, on_branch, on_vars = counts online_by_insgrp in
   let avg_off_complexity, avg_off_branch, avg_off_vars = avg_counts offline_by_insgroup  in
   let avg_on_complexity, avg_on_branch, avg_on_vars = avg_counts online_by_insgrp in
-
   let df  = 
-    let open Owl in 
-    let heads =  Array.of_list (StringMap.to_list  off_complexity |> List.map fst) in
-    let head_series = Dataframe.pack_string_series heads in
-    let array_of x = Array.map (fun h -> StringMap.find h x)  heads in
-    let vals x = Dataframe.pack_int_series (array_of x) in
-    let fvals x = Dataframe.pack_float_series (array_of x) in
-    let f = Dataframe.make [|"section";
+    let open NoCSV in 
+    let headsi =  (StringMap.to_list  off_complexity |> List.map fst) in
+    let array_of x = List.map (fun h -> StringMap.find h x) headsi in
+    let vals x = List.map (fun x -> IntC x) (array_of x) in
+    let fvals x = List.map (fun x -> FloatC x) (array_of x) in
+    let heads =  List.map (fun x -> StringC x) headsi in
+    let f = NoCSV.make (["section";
     "online dis";"offline dis";
     "online failed"; "offline failed";
     "online time total ms" ; "offline time total ms" ;
@@ -413,31 +421,117 @@ let do_analysis tblname (online_by_insgrp : grouped_res) offline_by_insgroup : u
       "online max variable count"; "offline max variable count";
     "online avg complexity"; "offline avg complexity";
     "online avg branch count"; "offline avg branch count";
-    "online avg variable count"; "offline avg variable count"
-    |] ~data:[|head_series; 
-        vals passed_on ; vals passed_off ;
-        vals failed_on ; vals failed_off ;
-        fvals total_s_ol ; fvals total_s_off ;
-        fvals avg_s_ol ; fvals avg_s_off;
-        vals on_complexity; vals off_complexity; 
-        vals on_branch ; vals off_branch ;
-        vals on_vars ; vals off_vars  ;
-        fvals avg_on_complexity; fvals avg_off_complexity; 
-        fvals avg_on_branch ; fvals avg_off_branch ;
-        fvals avg_on_vars ; fvals avg_off_vars  ;
-      |] in  f
-  in
-    Owl_pretty.pp_dataframe Format.std_formatter df ; 
-    Owl_dataframe.to_csv ~sep:',' df (tblname ^ ".csv")
+      "online avg variable count"; "offline avg variable count"]) [] in  
+      let f3 = NoCSV.add_columns f [heads;
+          vals passed_on ; vals passed_off ;
+          vals failed_on ; vals failed_off ;
+          fvals total_s_ol ; fvals total_s_off ;
+          fvals avg_s_ol ; fvals avg_s_off;
+          vals on_complexity; vals off_complexity; 
+          vals on_branch ; vals off_branch ;
+          vals on_vars ; vals off_vars  ;
+          fvals avg_on_complexity; fvals avg_off_complexity; 
+          fvals avg_on_branch ; fvals avg_off_branch ;
+          fvals avg_on_vars ; fvals avg_off_vars  
+      ] in
+      let x = open_out (tblname ^ ".csv") in
+      output_string x (NoCSV.to_csv f3); 
+      close_out x ;
+  in ()
   
 
-let main () = 
-(**  let ress  = if (Sys.file_exists fr) then loadr () else do_lift () in
-  let sum = List.fold_left (+) 0 in
-  let mmax = List.fold_left (max) 0 in
+module CanonicaliseNames = struct
+  type var_t = {name: ident ; index: int}
 
-  let (grouped : (bitsLit * i * dis_res) list StringMap.t) = StringMap.of_list @@ group_list (fun (ins, op, dr) -> ins) ress in
-  *)
+
+  let rec prints_arg_type (t: ty) : string =
+    match t with
+      | (Type_Bits e) -> "BV" ^ Asl_utils.pp_expr(e)
+      | (Type_Constructor (Ident "integer")) -> "I"
+      | (Type_Constructor (Ident "boolean")) -> "BOOL"
+      | (Type_Tuple l) -> (String.concat "_" (List.map prints_arg_type (l)))
+      | Type_Constructor (Ident "rt_label") -> "L"
+      | Type_Constructor (Ident "rt_sym") -> "S" 
+      | Type_Constructor (Ident "rt_expr") -> "E"
+      | Type_Constructor (Ident e) -> e 
+      | t -> failwith @@ "Unknown arg type: " ^ (Asl_utils.pp_type t)
+
+
+  let ident_for_v (e: var_t) : ident =
+    if e.index = 0 then e.name else
+    match e.name with
+    | Ident s -> Ident (s ^ "_" ^ (string_of_int e.index))
+    | FIdent (s, i) -> FIdent ((s ^ "_" ^ (string_of_int e.index), i))
+
+  let pident ty scoped = ((prints_arg_type ty) ^ "_var" ^ (Int.to_string @@ Stack.length scoped))
+
+  open Transforms.ScopedBindings
+
+  class renamer (globals) = object(this)
+    inherit Asl_visitor.nopAslVisitor
+
+    val renamed_mapping: (ident) Transforms.ScopedBindings.t =  Transforms.ScopedBindings.init ()
+    val scoped_bindings : (var_t) Transforms.ScopedBindings.t =  Transforms.ScopedBindings.init ()
+
+    method push_scope (_:unit) : unit = push_scope scoped_bindings ()
+    method pop_scope (_:unit) : unit = pop_scope scoped_bindings () 
+    method add_bind  (t:ty) (n: var_t): unit = add_bind scoped_bindings n.name n
+    method existing_binding (i: ident) : (var_t) option = match find_binding renamed_mapping i with
+      | Some n -> find_binding scoped_bindings n 
+      | None -> None
+
+    method! enter_scope (vs:(ty *ident) list) =  this#push_scope () 
+    method! leave_scope u =  this#pop_scope () 
+
+    method incr_binding (i: ident) : var_t =
+      let v = this#existing_binding i in
+      match v with
+      | Some (b) -> {b with index = b.index + 1}
+      | None -> {name=i; index=0}
+
+    method! vstmt s =
+      let nident t = Ident (pident t scoped_bindings)  in
+      match s with
+        | Stmt_VarDeclsNoInit(ty, vs, loc) ->
+            let ns = List.map this#incr_binding (List.mapi (fun i v -> Ident (pident ty scoped_bindings ^ (Int.to_string i))) vs) in
+            List.iter2 (fun n v -> (Transforms.ScopedBindings.add_bind renamed_mapping v n.name)) ns vs  ;
+            List.iter (this#add_bind ty) ns; DoChildren
+        | Stmt_VarDecl(ty, v, i, loc) ->
+            let nv = nident ty in
+            let b = this#incr_binding nv in
+            this#add_bind ty b; DoChildren
+        | Stmt_ConstDecl(ty, v, i, loc) ->
+            let nv = nident ty in
+            let b = this#incr_binding nv in
+            Transforms.ScopedBindings.add_bind scoped_bindings v b ;
+            this#add_bind ty b; DoChildren
+        (* Statements with child scopes that shouldn't appear towards the end of transform pipeline *)
+        | Stmt_Case _ -> failwith "(FixRedefinitions) case not expected"
+        | Stmt_For _ -> failwith "(FixRedefinitions) for not expected"
+        | Stmt_While _ -> failwith "(FixRedefinitions) while not expected"
+        | Stmt_Repeat _ -> failwith "(FixRedefinitions) repeat not expected"
+        | Stmt_Try _ -> failwith "(FixRedefinitions) try not expected"
+        | _ -> DoChildren
+
+    method! vlvar e =
+       (match (this#existing_binding e) with
+          | Some e -> ChangeTo (ident_for_v e)
+          | None -> SkipChildren)
+
+    method! vvar e =
+       (match (this#existing_binding e) with
+          | Some e -> ChangeTo (ident_for_v e)
+          | None -> SkipChildren)
+    end
+
+  let run (g: Asl_utils.IdentSet.t) (s:stmt list) : stmt list =
+    let v = new renamer g in
+    visit_stmts v s
+end
+
+
+
+let main () = 
 
   Printf.printf "Online starting..." ;
   flush stdout;
@@ -459,24 +553,28 @@ let main () =
     Printf.printf "%s\n" name ;
     StringMap.iter (fun k v -> Printf.printf "%s,%f\n" k (ns_to_s @@ Int64.to_float v)) x
   in
-  let ptbli name x = 
-    Printf.printf "%s\n" name ;
-    StringMap.iter (fun k v -> Printf.printf "%s,%d\n" k (v)) x
-  in
   ptbl "total by ins" tot;
 
   let online_by_insgrp = (group_list (fun (ins, op,dis) -> insname ins) online) in
   let offline_by_insgroup = (group_list (fun (ins, op,dis) -> insname ins) offline ) in
-  do_analysis "by_instruction_group" online_by_insgrp offline_by_insgroup ;
+  do_analysis "by_instruction_group" online_by_insgrp offline_by_insgroup |> ignore;
   let online_by_insgrp = (group_list (fun (ins, op,dis) -> ins) online) in
   let offline_by_insgroup = (group_list (fun (ins, op,dis) -> ins) offline ) in
-  do_analysis "by_instruction" online_by_insgrp offline_by_insgroup ;
+  do_analysis "by_instruction" online_by_insgrp offline_by_insgroup |> ignore;
+  let to_sm x = StringMap.of_list (List.map (fun (ins, op,dis) -> (hex_of_int op), [(ins,op,dis)]) x) in
+  let offline_by_opcode = to_sm offline in 
+  let online_by_opcode = to_sm online in
+  do_analysis "by_opcode" online_by_opcode offline_by_opcode; 
   let dump_group pref g (rs:grouped_res) = 
     let to_dump = StringMap.find g rs in
-    let progs = List.map (function 
-      | (_,_,Result.Ok (b,_)) -> String.concat "\n" (List.map (fun x -> Utils.to_string (Asl_parser_pp.pp_raw_stmt x))  b)
-      | _ -> "error"
+    let progs : stmt list list = List.map (function 
+      | (_,_,Result.Ok (b,_)) -> CanonicaliseNames.run Asl_utils.IdentSet.empty b
+      | b -> []
     ) to_dump in
+    let progs = List.map (function 
+      | [] -> "error"
+      | b -> String.concat "\n" (List.map (fun x -> Utils.to_string (Asl_parser_pp.pp_raw_stmt x))  b)
+    ) progs in
     let progs  = List.map (String.map (function 
       | ';' -> ','
       | c -> c
@@ -490,35 +588,9 @@ let main () =
   in
     dump_group "comparout/offline-" "aarch64_vector_arithmetic_unary_special_sqrt_est_fp16_simd" offline_by_insgroup |> ignore;
     dump_group "comparout/online-" "aarch64_vector_arithmetic_unary_special_sqrt_est_fp16_simd" online_by_insgrp |> ignore;
+    dump_group "comparout/offline-" "aarch64_float_arithmetic_round_frint" offline_by_insgroup |> ignore ;
+    dump_group "comparout/online-" "aarch64_float_arithmetic_round_frint" online_by_insgrp |> ignore ;
   ()
-
-  (*
-  let stmtcounts = open_out ("stmt-counts.csv") in
-
-  output_string stmtcounts "decode,maxonline,maxoffline\n" ;
-
-  StringMap.iter (fun k (v : (string * i * (dis_res)) list)  -> 
-    let counts = List.map (fun (ins, op, (dr)) -> (count_stmts_list (unres dr.online)), (count_stmts_list (unres dr.offline))) v  in
-    let counts_on = mmax (List.map fst counts) in
-    let counts_off = mmax (List.map snd counts) in
-    let s = Printf.sprintf "%s,%d,%d\n" k counts_on counts_off in
-    output_string stmtcounts s ;
-    Printf.printf "%s" s ;
-
-    let ins, op, dr = (List.find (fun (ins, op, dr) -> (counts_on) = (count_stmts_list @@ unres dr.online)) v) in
-    (* diffs *)
-      let name = Printf.sprintf "comparout/%s-%x-" k op in
-      let printssl sl = String.concat "\n" (List.map (fun s -> Utils.to_string (Asl_parser_pp.pp_raw_stmt s)) sl) in 
-      let offlinechan = open_out (name ^ "offline") in
-      let onlinechan = open_out (name ^ "online") in
-      output_string offlinechan (printssl @@ unres dr.offline) ;
-      output_string onlinechan (printssl @@ unres dr.online) ;
-      close_out offlinechan; 
-      close_out onlinechan;
-  ) grouped;
-  close_out stmtcounts;
-  ress 
-*)
 
 
 let () = main () |> ignore
